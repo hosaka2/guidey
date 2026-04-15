@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+.venv/
+*.egg
+
+# Node / Expo
+node_modules/
+.expo/
+dist/
+*.tsbuildinfo
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Database (Milvus, SQLite, 旧ChromaDB)
+*.db
+*.db.lock
+backend/db/diy/
+backend/db/cooking/
+
+# Video/Frame data (大きいのでコミットしない)
+backend/static/videos/
+
+# Logs
+*.log

@@ -1,0 +1,20 @@
+[project]
+name = "guidey-backend"
+version = "0.1.0"
+description = "Guidey - AI-powered hands-free guide for DIY and cooking"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.34",
+    "python-multipart>=0.0.18",
+    "pydantic-settings>=2.7",
+    "langchain-anthropic>=0.3",
+    "langchain-milvus>=0.2",
+    "pymilvus[milvus-lite]>=2.5",
+    "langchain-ollama>=0.3",
+    "langchain-core>=0.3",
+    "setuptools<82",
+    "langgraph>=1.1.6",
+    "rank-bm25>=0.2.2",
+    "numpy>=2.4.4",
+]

@@ -1,0 +1,55 @@
+{
+  "source_id": "mac-setup",
+  "mode": "diy",
+  "title": "Mac初期セットアップ",
+  "steps": [
+    {
+      "step_number": 1,
+      "text": "Macの電源を入れて、言語選択画面で「日本語」を選択します。地域は「日本」を選んでください。",
+      "visual_marker": "言語選択画面が表示され、日本語が選択されている",
+      "frame": "frame_01.jpg"
+    },
+    {
+      "step_number": 2,
+      "text": "Wi-Fiネットワークを選択して、パスワードを入力して接続します。ネットワークが見つからない場合は「その他のネットワークオプション」をタップ。",
+      "visual_marker": "Wi-Fi設定画面が表示され、ネットワークに接続済みのチェックマークが見える",
+      "frame": "frame_02.jpg"
+    },
+    {
+      "step_number": 3,
+      "text": "Apple IDでサインインします。まだApple IDがなければ「Apple IDを作成」を選択。2ファクタ認証の確認コードが必要です。",
+      "visual_marker": "Apple IDサインイン画面またはサインイン完了画面が見える",
+      "frame": "frame_03.jpg"
+    },
+    {
+      "step_number": 4,
+      "text": "利用規約に同意して、コンピュータアカウントを作成します。フルネーム、アカウント名、パスワードを設定してください。",
+      "visual_marker": "アカウント作成フォームが表示されている、またはアカウント設定完了",
+      "frame": "frame_04.jpg"
+    },
+    {
+      "step_number": 5,
+      "text": "Touch IDを設定します。指紋センサーに指を何度か置いて登録します。後からでも設定可能です。",
+      "visual_marker": "Touch ID設定画面で指紋の登録が進んでいる、または完了している",
+      "frame": "frame_05.jpg"
+    },
+    {
+      "step_number": 6,
+      "text": "外観モードを選択します。ライト、ダーク、自動の3つから選べます。お好みで選んでください。",
+      "visual_marker": "外観モード選択画面が表示されている",
+      "frame": "frame_06.jpg"
+    },
+    {
+      "step_number": 7,
+      "text": "デスクトップが表示されたら、まずシステム設定を開いてソフトウェアアップデートを確認します。左上のAppleメニュー → システム設定 → 一般 → ソフトウェアアップデート。",
+      "visual_marker": "macOSデスクトップが表示されている、またはシステム設定が開いている",
+      "frame": "frame_07.jpg"
+    },
+    {
+      "step_number": 8,
+      "text": "Finderの設定を変更します。Finder → 設定 → 詳細で「すべてのファイル名拡張子を表示」をオンにしましょう。",
+      "visual_marker": "Finderの設定画面が開いている",
+      "frame": "frame_08.jpg"
+    }
+  ]
+}
