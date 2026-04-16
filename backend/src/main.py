@@ -13,11 +13,27 @@ from .common.exceptions import DomainException, ValidationError
 from .config import settings
 from .routes import api_router
 
+
+# === Logger 統一フォーマット ===
+def _setup_logging() -> None:
+    fmt = "[%(asctime)s] %(levelname)-5s %(name)s | %(message)s"
+    datefmt = "%H:%M:%S"
+    logging.basicConfig(level=logging.INFO, format=fmt, datefmt=datefmt, force=True)
+    # ライブラリのログを抑制
+    for noisy in ("httpx", "httpcore", "urllib3", "pymilvus", "opentelemetry"):
+        logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+_setup_logging()
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # === OpenTelemetry 初期化 ===
+    from .common.telemetry import init_telemetry
+    init_telemetry(enable_console=settings.debug)
+
     logger.info("Starting Guidey API...")
     # パーソナライズDB初期化
     from .infrastructure.repositories.feedback_repository import init_db
@@ -25,7 +41,24 @@ async def lifespan(app: FastAPI):
         init_db()
     except Exception:
         logger.warning("Failed to init personalization DB", exc_info=True)
+
+    # Valkey 接続確認
+    from .application.dependencies import get_session_store
+    try:
+        store = get_session_store()
+        client = await store._get_client()
+        await client.ping()
+        logger.info("Valkey connected (%s)", settings.redis_url)
+    except Exception:
+        logger.warning("Valkey connection failed — sessions will not work", exc_info=True)
+
     yield
+
+    # Valkey クリーンアップ
+    try:
+        await get_session_store().close()
+    except Exception:
+        pass
     logger.info("Shutting down Guidey API...")
 
 
@@ -78,3 +111,10 @@ app.include_router(api_router, prefix=settings.api_prefix)
 @app.get("/")
 async def root():
     return {"message": f"Welcome to {settings.app_name}"}
+
+
+@app.get("/metrics")
+async def metrics():
+    """パイプラインメトリクス (インメモリ、dev/LT用)."""
+    from .common.metrics import pipeline_metrics
+    return pipeline_metrics.summary()

@@ -11,16 +11,15 @@ import {
   ScrollView,
 } from "react-native";
 import { View, Text } from "@tamagui/core";
-import { useLocalSearchParams, useRouter } from "expo-router";
-import { Feather, MaterialCommunityIcons } from "@expo/vector-icons";
-import { MODES, type ModeKey } from "@/constants/modes";
+import { useRouter } from "expo-router";
+import { Feather } from "@expo/vector-icons";
 import { useApiContext } from "@/contexts/ApiContext";
 import { generatePlan } from "@/hooks/useJudgeApi";
-import type { GuideModeType } from "@/constants/Config";
 import type { Plan } from "@/types/plan";
 
+const ACCENT = "#FF6B35";
+
 export default function GoalScreen() {
-  const { mode } = useLocalSearchParams<{ mode: string }>();
   const router = useRouter();
   const { apiUrl } = useApiContext();
   const [goal, setGoal] = useState("");
@@ -28,21 +27,13 @@ export default function GoalScreen() {
   const [error, setError] = useState<string | null>(null);
   const [generatedPlan, setGeneratedPlan] = useState<Plan | null>(null);
 
-  const config = MODES[(mode as ModeKey) ?? "diy"] ?? MODES.diy;
-
   const handleGenerate = async () => {
     if (!goal.trim()) return;
-
     setIsGenerating(true);
     setError(null);
     setGeneratedPlan(null);
-
     try {
-      const plan = await generatePlan(
-        apiUrl,
-        goal.trim(),
-        (mode ?? "diy") as GuideModeType
-      );
+      const plan = await generatePlan(apiUrl, goal.trim());
       setGeneratedPlan(plan);
     } catch (err) {
       console.warn("[GoalScreen] Plan generation failed:", err);
@@ -55,13 +46,7 @@ export default function GoalScreen() {
   const handleStartWithPlan = () => {
     if (!generatedPlan) return;
     router.push(
-      `/guide?mode=${mode}&goal=${encodeURIComponent(goal.trim())}&planId=${generatedPlan.source_id}`
-    );
-  };
-
-  const handleStartManual = () => {
-    router.push(
-      `/guide?mode=${mode}&goal=${encodeURIComponent(goal.trim())}`
+      `/guide?goal=${encodeURIComponent(goal.trim())}&planId=${generatedPlan.source_id}`
     );
   };
 
@@ -90,11 +75,11 @@ export default function GoalScreen() {
               <Feather name="chevron-left" size={28} color="#333" />
             </Pressable>
             <Text fontSize="$7" fontWeight="700" color="$color">
-              {config.labelWithMode}
+              プラン作成
             </Text>
           </View>
 
-          {/* Plan confirmation view */}
+          {/* Plan confirmation */}
           {generatedPlan ? (
             <View flex={1} paddingBottom="$4">
               <Text fontSize="$5" fontWeight="600" color="$color" paddingVertical="$3">
@@ -105,12 +90,8 @@ export default function GoalScreen() {
                 {generatedPlan.steps.map((step) => (
                   <View key={step.step_number} style={styles.planStep}>
                     <View
-                      width={28}
-                      height={28}
-                      borderRadius={14}
-                      backgroundColor={config.color}
-                      alignItems="center"
-                      justifyContent="center"
+                      width={28} height={28} borderRadius={14}
+                      backgroundColor={ACCENT} alignItems="center" justifyContent="center"
                     >
                       <Text fontSize="$2" fontWeight="700" color="#fff">
                         {step.step_number}
@@ -130,13 +111,12 @@ export default function GoalScreen() {
                 ))}
               </ScrollView>
 
-              {/* Action buttons */}
               <View gap="$3" paddingTop="$3">
                 <Pressable
                   onPress={handleStartWithPlan}
                   style={({ pressed }) => [
                     styles.startButton,
-                    { backgroundColor: config.color },
+                    { backgroundColor: ACCENT },
                     pressed && styles.startPressed,
                   ]}
                 >
@@ -146,72 +126,33 @@ export default function GoalScreen() {
                   </Text>
                 </Pressable>
 
-                <View flexDirection="row" gap="$3">
-                  <Pressable
-                    onPress={handleRegenerate}
-                    disabled={isGenerating}
-                    style={({ pressed }) => [
-                      styles.secondaryButton,
-                      { borderColor: config.color },
-                      pressed && styles.startPressed,
-                    ]}
-                  >
-                    <Feather name="refresh-cw" size={16} color={config.color} />
-                    <Text color={config.color} fontWeight="600" fontSize="$3">
-                      再生成
-                    </Text>
-                  </Pressable>
-
-                  <Pressable
-                    onPress={handleStartManual}
-                    style={({ pressed }) => [
-                      styles.secondaryButton,
-                      { borderColor: "#999" },
-                      pressed && styles.startPressed,
-                    ]}
-                  >
-                    <Feather name="camera" size={16} color="#999" />
-                    <Text color="#999" fontWeight="600" fontSize="$3">
-                      手動モード
-                    </Text>
-                  </Pressable>
-                </View>
+                <Pressable
+                  onPress={handleRegenerate}
+                  disabled={isGenerating}
+                  style={({ pressed }) => [
+                    styles.secondaryButton,
+                    { borderColor: ACCENT },
+                    pressed && styles.startPressed,
+                  ]}
+                >
+                  <Feather name="refresh-cw" size={16} color={ACCENT} />
+                  <Text color={ACCENT} fontWeight="600" fontSize="$3">
+                    再生成
+                  </Text>
+                </Pressable>
               </View>
             </View>
           ) : (
-            /* Goal input view */
+            /* Goal input */
             <View flex={1} justifyContent="center" gap="$6" paddingBottom="$8">
-              {/* Mode Icon */}
-              <View alignItems="center">
-                <View
-                  width={80}
-                  height={80}
-                  borderRadius={40}
-                  backgroundColor={config.color + "15"}
-                  alignItems="center"
-                  justifyContent="center"
-                >
-                  <MaterialCommunityIcons
-                    name={config.icon}
-                    size={40}
-                    color={config.color}
-                  />
-                </View>
-              </View>
-
-              <Text
-                textAlign="center"
-                fontSize="$6"
-                fontWeight="600"
-                color="$color"
-              >
+              <Text textAlign="center" fontSize="$6" fontWeight="600" color="$color">
                 何をしますか？
               </Text>
 
               <View paddingHorizontal="$2">
                 <TextInput
-                  style={[styles.input, { borderColor: config.color + "40" }]}
-                  placeholder={config.goalPlaceholder}
+                  style={[styles.input, { borderColor: ACCENT + "40" }]}
+                  placeholder="例: カレーを作る、棚を組み立てる"
                   placeholderTextColor="#999"
                   value={goal}
                   onChangeText={setGoal}
@@ -224,20 +165,18 @@ export default function GoalScreen() {
               </View>
 
               {error && (
-                <View paddingHorizontal="$2">
-                  <Text color="#EF4444" fontSize="$3" textAlign="center">
-                    {error}
-                  </Text>
-                </View>
+                <Text color="#EF4444" fontSize="$3" textAlign="center" paddingHorizontal="$2">
+                  {error}
+                </Text>
               )}
 
-              <View paddingHorizontal="$2" gap="$3">
+              <View paddingHorizontal="$2">
                 <Pressable
                   onPress={handleGenerate}
                   disabled={!goal.trim() || isGenerating}
                   style={({ pressed }) => [
                     styles.startButton,
-                    { backgroundColor: config.color },
+                    { backgroundColor: ACCENT },
                     (!goal.trim() || isGenerating) && styles.startDisabled,
                     pressed && styles.startPressed,
                   ]}
@@ -258,20 +197,6 @@ export default function GoalScreen() {
                     </>
                   )}
                 </Pressable>
-
-                <Pressable
-                  onPress={handleStartManual}
-                  style={({ pressed }) => [
-                    styles.secondaryButton,
-                    { borderColor: "#999" },
-                    pressed && styles.startPressed,
-                  ]}
-                >
-                  <Feather name="camera" size={16} color="#666" />
-                  <Text color="#666" fontWeight="600" fontSize="$3">
-                    プランなしで開始
-                  </Text>
-                </Pressable>
               </View>
             </View>
           )}
@@ -282,56 +207,25 @@ export default function GoalScreen() {
 }
 
 const styles = StyleSheet.create({
-  safe: {
-    flex: 1,
-    backgroundColor: "#F8F9FA",
-  },
+  safe: { flex: 1, backgroundColor: "#F8F9FA" },
   input: {
-    backgroundColor: "#fff",
-    borderRadius: 16,
-    borderWidth: 1.5,
-    paddingHorizontal: 20,
-    paddingVertical: 16,
-    fontSize: 17,
-    color: "#1A1A1A",
-    minHeight: 56,
-    maxHeight: 120,
+    backgroundColor: "#fff", borderRadius: 16, borderWidth: 1.5,
+    paddingHorizontal: 20, paddingVertical: 16, fontSize: 17,
+    color: "#1A1A1A", minHeight: 56, maxHeight: 120,
   },
   startButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 10,
-    paddingVertical: 16,
-    borderRadius: 16,
+    flexDirection: "row", alignItems: "center", justifyContent: "center",
+    gap: 10, paddingVertical: 16, borderRadius: 16,
   },
   secondaryButton: {
-    flexDirection: "row",
-    alignItems: "center",
-    justifyContent: "center",
-    gap: 6,
-    paddingVertical: 14,
-    borderRadius: 12,
-    borderWidth: 1.5,
+    flexDirection: "row", alignItems: "center", justifyContent: "center",
+    gap: 6, paddingVertical: 14, borderRadius: 12, borderWidth: 1.5,
   },
-  startDisabled: {
-    opacity: 0.4,
-  },
-  startPressed: {
-    opacity: 0.8,
-    transform: [{ scale: 0.98 }],
-  },
-  planList: {
-    flex: 1,
-    backgroundColor: "#fff",
-    borderRadius: 16,
-    padding: 16,
-  },
+  startDisabled: { opacity: 0.4 },
+  startPressed: { opacity: 0.8, transform: [{ scale: 0.98 }] },
+  planList: { flex: 1, backgroundColor: "#fff", borderRadius: 16, padding: 16 },
   planStep: {
-    flexDirection: "row",
-    gap: 12,
-    paddingVertical: 10,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderBottomColor: "#E5E5E5",
+    flexDirection: "row", gap: 12, paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: "#E5E5E5",
   },
 });

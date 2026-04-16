@@ -1,18 +1,9 @@
-from enum import Enum
 from typing import Literal
 
 from pydantic import BaseModel
 
-
-class GuideMode(str, Enum):
-    DIY = "diy"
-    COOKING = "cooking"
-
-
-class ModeConfig(BaseModel):
-    prompt: str
-    collection: str
-    label: str = ""
+# RAG コレクション一覧 (横断検索用)
+RAG_COLLECTIONS = ["diy", "cooking"]
 
 
 class RagResult(BaseModel):
@@ -26,6 +17,7 @@ class RagResult(BaseModel):
 
 
 # --- 自律エージェント ---
+
 class PlanStep(BaseModel):
     step_number: int
     text: str
@@ -65,6 +57,7 @@ class FailedPlan(BaseModel):
 
 
 # --- 安全ルール (ドメインポリシー) ---
+
 SAFETY_KEYWORDS: dict[str, str] = {
     "危険": "危険な作業が検出されました。注意してください。",
     "火": "火を使う作業です。換気と消火器の確認を。",
@@ -84,15 +77,48 @@ def check_step_safety(step: PlanStep) -> tuple[str, str]:
     return "none", ""
 
 
-MODE_CONFIGS: dict[GuideMode, ModeConfig] = {
-    GuideMode.DIY: ModeConfig(
-        prompt="プロの職人として、画像と手順書から次の1ステップを短く指示して。",
-        collection="diy",
-        label="DIY作業",
-    ),
-    GuideMode.COOKING: ModeConfig(
-        prompt="プロのシェフとして、焼き加減や工程を判断し、次の1ステップを短く指示して。",
-        collection="cooking",
-        label="料理",
-    ),
-}
+def sanitize_llm_output(
+    message: str,
+    blocks: list[dict],
+    max_message_length: int = 500,
+    max_blocks: int = 5,
+) -> tuple[str, list[dict]]:
+    """LLM出力のサニタイズ (ドメインポリシー).
+
+    - メッセージ長制限 (暴走防止)
+    - ブロック数制限
+    - 不適切コンテンツフィルタ (URL注入、スクリプト埋め込み)
+    """
+    # メッセージ長制限
+    if len(message) > max_message_length:
+        message = message[:max_message_length] + "…"
+
+    # 危険パターン除去 (LLM injection / prompt leak 対策)
+    _BLOCKED_PATTERNS = [
+        "javascript:",
+        "<script",
+        "data:text/html",
+        "system prompt",
+        "ignore previous",
+    ]
+    msg_lower = message.lower()
+    for pattern in _BLOCKED_PATTERNS:
+        if pattern in msg_lower:
+            message = "応答を生成できませんでした"
+            break
+
+    # ブロック数制限
+    blocks = blocks[:max_blocks]
+
+    # ブロック内のURL検証 (image/video)
+    safe_blocks = []
+    for b in blocks:
+        if b.get("type") in ("image", "video"):
+            url = b.get("url", "")
+            if url and not url.startswith(("http://", "https://", "/")):
+                continue  # 不正URL → 除外
+        safe_blocks.append(b)
+
+    return message, safe_blocks
+
+

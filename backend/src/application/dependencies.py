@@ -16,6 +16,8 @@ from src.infrastructure.rag.embeddings import EmbeddingClient
 from src.infrastructure.rag.hybrid import HybridSearchClient
 from src.infrastructure.rag.milvus import MilvusRAGClient
 
+from src.infrastructure.session.store import ValkeySessionStore
+
 logger = logging.getLogger(__name__)
 
 # シングルトン
@@ -23,6 +25,14 @@ _rag_client: MilvusRAGClient | None = None
 _embedding_client: EmbeddingClient | None = None
 _hybrid_client: HybridSearchClient | None = None
 _bm25_index: BM25Index | None = None
+_session_store: ValkeySessionStore | None = None
+
+
+def get_session_store() -> ValkeySessionStore:
+    global _session_store
+    if _session_store is None:
+        _session_store = ValkeySessionStore()
+    return _session_store
 
 
 def get_guide_service() -> GuideService:
@@ -89,6 +99,7 @@ def get_judge_use_case(
     embedding_client: EmbeddingClient | None = Depends(get_embedding_client),
     hq_client: LLMClient = Depends(get_hq_llm_client),
     rag_client: MilvusRAGClient | None = Depends(get_rag_client),
+    session_store: ValkeySessionStore = Depends(get_session_store),
 ) -> JudgeUseCase:
     return JudgeUseCase(
         guide_service=guide_service,
@@ -96,6 +107,7 @@ def get_judge_use_case(
         embedding_client=embedding_client,
         hq_client=hq_client,
         rag_client=rag_client,
+        session_store=session_store,
     )
 
 
@@ -105,6 +117,7 @@ def get_chat_use_case(
     hq_client: LLMClient = Depends(get_hq_llm_client),
     rag_client: MilvusRAGClient | None = Depends(get_rag_client),
     embedding_client: EmbeddingClient | None = Depends(get_embedding_client),
+    session_store: ValkeySessionStore = Depends(get_session_store),
 ) -> ChatUseCase:
     return ChatUseCase(
         guide_service=guide_service,
@@ -112,6 +125,7 @@ def get_chat_use_case(
         hq_client=hq_client,
         rag_client=rag_client,
         embedding_client=embedding_client,
+        session_store=session_store,
     )
 
 

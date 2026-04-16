@@ -1,11 +1,8 @@
 from pydantic import BaseModel
 
-from src.domain.guide.model import GuideMode
-
 
 class GuideResponse(BaseModel):
     instruction: str
-    mode: GuideMode
     reference_image_url: str | None = None
     current_step: int | None = None
     total_steps: int | None = None
@@ -37,6 +34,7 @@ class PlanStepResponse(BaseModel):
 class PlanResponse(BaseModel):
     source_id: str
     title: str
+    session_id: str = ""
     steps: list[PlanStepResponse]
 
 
@@ -60,7 +58,10 @@ class ChatResponse(BaseModel):
 
 class PlanGenerateRequest(BaseModel):
     goal: str
-    mode: GuideMode
+
+
+class SessionStartResponse(BaseModel):
+    session_id: str
 
 
 # --- フィードバック ---

@@ -57,6 +57,13 @@ export default function RootLayout() {
             }}
           />
           <Stack.Screen
+            name="explore"
+            options={{
+              headerShown: false,
+              animation: "slide_from_right",
+            }}
+          />
+          <Stack.Screen
             name="settings"
             options={{
               presentation: "modal",

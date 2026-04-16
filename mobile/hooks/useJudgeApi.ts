@@ -1,9 +1,8 @@
 import type { Block } from "@/types/blocks";
 import type { JudgeResponse, Plan } from "@/types/plan";
-import type { GuideModeType } from "@/constants/Config";
 
 /**
- * プランを取得する.
+ * プランを取得する (session_id がレスポンスに含まれる).
  */
 export async function fetchPlan(
   apiUrl: string,
@@ -17,15 +16,12 @@ export async function fetchPlan(
 }
 
 /**
- * 画像を送信して3択判定を取得する.
+ * 画像を送信して3択判定を取得する. session_id + image のみ.
  */
 export async function callJudge(
   apiUrl: string,
   imageUri: string,
-  planSourceId: string,
-  currentStepIndex: number,
-  recentObservations: string[],
-  userMessage: string = "",
+  sessionId: string,
 ): Promise<JudgeResponse> {
   const formData = new FormData();
 
@@ -36,12 +32,7 @@ export async function callJudge(
     type: "image/jpeg",
   } as unknown as Blob);
 
-  formData.append("plan_source_id", planSourceId);
-  formData.append("current_step_index", String(currentStepIndex));
-  formData.append("recent_observations", JSON.stringify(recentObservations));
-  if (userMessage) {
-    formData.append("user_message", userMessage);
-  }
+  formData.append("session_id", sessionId);
 
   const t0 = Date.now();
   const res = await fetch(`${apiUrl}/guide/judge`, {
@@ -61,21 +52,17 @@ export async function callJudge(
 }
 
 /**
- * ユーザー対話 (tool calling + 2段階LLM).
+ * ユーザー対話. session_id + message (+ image) のみ.
  */
 export async function callChat(
   apiUrl: string,
   userMessage: string,
   imageUri: string | null,
-  planSourceId: string = "",
-  currentStepIndex: number = 0,
-  recentObservations: string[] = [],
+  sessionId: string = "",
 ): Promise<{ message: string; blocks: Block[]; escalated: boolean }> {
   const formData = new FormData();
   formData.append("user_message", userMessage);
-  formData.append("plan_source_id", planSourceId);
-  formData.append("current_step_index", String(currentStepIndex));
-  formData.append("recent_observations", JSON.stringify(recentObservations));
+  formData.append("session_id", sessionId);
 
   if (imageUri) {
     const filename = imageUri.split("/").pop() ?? "photo.jpg";
@@ -104,18 +91,20 @@ export async function callChat(
 }
 
 /**
- * ゴールからプランを自動生成する.
+ * ゴールからプランを自動生成する (session_id がレスポンスに含まれる).
+ */
+/**
+ * ゴールからプランを自動生成する (session_id がレスポンスに含まれる).
  */
 export async function generatePlan(
   apiUrl: string,
   goal: string,
-  mode: GuideModeType
 ): Promise<Plan> {
   const t0 = Date.now();
   const res = await fetch(`${apiUrl}/guide/plan/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ goal, mode }),
+    body: JSON.stringify({ goal }),
   });
   console.log(`[PlanGen] fetch took ${Date.now() - t0}ms, status=${res.status}`);
 
@@ -124,5 +113,20 @@ export async function generatePlan(
     throw new Error(`Plan generation failed: ${res.status} ${text}`);
   }
 
+  return res.json();
+}
+
+/**
+ * 探索モード用セッション開始 (プランなし).
+ */
+export async function startSession(
+  apiUrl: string,
+): Promise<{ session_id: string }> {
+  const res = await fetch(`${apiUrl}/guide/session/start`, {
+    method: "POST",
+  });
+  if (!res.ok) {
+    throw new Error(`Session start failed: ${res.status}`);
+  }
   return res.json();
 }

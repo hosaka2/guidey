@@ -3,7 +3,25 @@ import { SafeAreaView } from "react-native-safe-area-context";
 import { View, Text } from "@tamagui/core";
 import { useRouter } from "expo-router";
 import { MaterialCommunityIcons, Feather } from "@expo/vector-icons";
-import { MODE_LIST } from "@/constants/modes";
+
+const CARDS = [
+  {
+    key: "explore",
+    icon: "magnify" as const,
+    color: "#6C63FF",
+    label: "探索",
+    description: "自由に質問",
+    route: "/explore",
+  },
+  {
+    key: "plan",
+    icon: "clipboard-list-outline" as const,
+    color: "#FF6B35",
+    label: "プラン",
+    description: "手順に沿ってガイド",
+    route: "/goal",
+  },
+];
 
 export default function HomeScreen() {
   const router = useRouter();
@@ -36,19 +54,19 @@ export default function HomeScreen() {
             color="$color"
             opacity={0.7}
           >
-            何をガイドしますか？
+            何をしますか？
           </Text>
 
-          {/* Mode Cards */}
+          {/* Cards */}
           <View flexDirection="row" gap="$4" justifyContent="center">
-            {MODE_LIST.map((mode) => (
+            {CARDS.map((card) => (
               <Pressable
-                key={mode.key}
+                key={card.key}
                 style={({ pressed }) => [
                   styles.card,
                   pressed && styles.cardPressed,
                 ]}
-                onPress={() => router.push(`/goal?mode=${mode.key}`)}
+                onPress={() => router.push(card.route as any)}
                 accessibilityRole="button"
               >
                 <View alignItems="center" gap="$3">
@@ -56,21 +74,21 @@ export default function HomeScreen() {
                     width={72}
                     height={72}
                     borderRadius={36}
-                    backgroundColor={mode.color + "15"}
+                    backgroundColor={card.color + "15"}
                     alignItems="center"
                     justifyContent="center"
                   >
                     <MaterialCommunityIcons
-                      name={mode.icon}
+                      name={card.icon}
                       size={36}
-                      color={mode.color}
+                      color={card.color}
                     />
                   </View>
                   <Text fontSize="$6" fontWeight="700" color="$color">
-                    {mode.label}
+                    {card.label}
                   </Text>
                   <Text fontSize="$2" color="$color" opacity={0.5}>
-                    {mode.description}
+                    {card.description}
                   </Text>
                 </View>
               </Pressable>

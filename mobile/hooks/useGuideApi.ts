@@ -1,5 +1,4 @@
 import { useState, useCallback, useRef } from "react";
-import { GuideModeType } from "@/constants/Config";
 import { useApiContext } from "@/contexts/ApiContext";
 
 export type StepSummary = {
@@ -17,7 +16,6 @@ type StreamMeta = {
 
 function buildFormData(
   imageUri: string,
-  mode: GuideModeType,
   triggerWord: string,
   goal: string
 ): FormData {
@@ -27,7 +25,6 @@ function buildFormData(
     name: "photo.jpg",
     type: "image/jpeg",
   } as unknown as Blob);
-  formData.append("mode", mode);
   formData.append("trigger_word", triggerWord);
   formData.append("goal", goal);
   return formData;
@@ -140,7 +137,6 @@ export function useGuideApi() {
   const analyzeStream = useCallback(
     (
       imageUri: string,
-      mode: GuideModeType,
       triggerWord: string,
       goal: string = "",
       onSentence?: (sentence: string) => void
@@ -149,9 +145,8 @@ export function useGuideApi() {
 
       setIsLoading(true);
       setError(null);
-      // 指示カードの内容はリセットしない (ステップ遷移時のみ更新)
 
-      const formData = buildFormData(imageUri, mode, triggerWord, goal);
+      const formData = buildFormData(imageUri, triggerWord, goal);
 
       return new Promise((resolve) => {
         const abort = streamSSE(

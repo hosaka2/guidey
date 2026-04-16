@@ -1,191 +1,180 @@
 # Guidey
 
-DIY・料理などの作業を、スマホカメラ画像と音声でAIがリアルタイムにガイドするアプリ
+**ハンズフリーAI作業ガイド** — カメラ越しに作業を見守り、音声で自律的にナビゲーションするエージェント。
 
-## プロジェクト概要
+料理やDIYの作業中、スマホを手に持たなくても、AIがカメラで状況を判断し、「次はこうして」「火が強すぎます」と声で教えてくれる。
 
-Guideyは、手を離した状態でも音声操作でAIの指示を受けられるハンズフリーアシスタントです。
-「次」「できた」などのキーワードに反応し、その瞬間のカメラ画像をAIが解析して次のステップを音声で指示します。
+---
 
-### 主な特徴
+## Tech Stack
 
-- **音声トリガー**: デバイス側でキーワードを検知し、ハンズフリー操作を実現
-- **画像解析**: キーワード検知時にカメラから静止画を1枚切り出し、Claude が状況を判断
-- **モード切替**: DIY / 料理に応じてプロンプトと参照知識(RAG)を切り替え
-- **音声合成(TTS)**: AIの指示をデバイスで読み上げ
-- **低コスト設計**: 動画ではなく静止画1枚、ローカルChromaDBでコスト最小化
+| Layer | Technology |
+|-------|-----------|
+| **Mobile** | React Native / Expo / TypeScript / Tamagui |
+| **Backend** | FastAPI / Python 3.12 / DDD |
+| **LLM** | Gemma 4 (Ollama, ローカル) / Claude Sonnet (API, エスカレーション) |
+| **Agent** | LangGraph State Machine / 統一2段階パイプライン |
+| **RAG** | Milvus Lite + BM25 ハイブリッド検索 / YouTube自動取り込み |
+| **Session** | Valkey (Redis互換) / TTL 30分自動揮発 |
+| **Observability** | OpenTelemetry (Traces + Metrics) / LangSmith |
+| **Voice** | expo-speech-recognition (STT) / expo-speech (TTS) |
+
+---
+
+## 自律エージェント
+
+ユーザーが何も操作しなくても、AIが自律的に判断して声をかける。
+
+```
+Camera (3秒間隔, 適応的)
+  ↓
+┌──────────────────────────────────────────┐
+│  統一2段階パイプライン                       │
+│                                          │
+│  Stage 1: Gemma (fast, ~1s)              │
+│    ├─ 定期判定: continue / next / anomaly │
+│    └─ ユーザー対話: 即応答 + ツール実行     │
+│           ↓                              │
+│  can_handle?                             │
+│    ├─ Yes (95%) → 結果を返す              │
+│    └─ No  (5%)  → Stage 2へ              │
+│                                          │
+│  Stage 2: HQ / Claude (deep, ~3-5s)     │
+│    RAG検索 + ツール実行 + プラン修正       │
+└──────────────────────────────────────────┘
+  ↓
+Safety Check → Act → TTS読み上げ
+```
+
+**定期判定** (periodic) と**ユーザー対話** (user_action) が同じパイプラインを共有。入口だけ違う。
+
+### ハーネス (安全装置)
+
+LLMを信頼しすぎない。7層の安全装置で暴走を防ぐ。
+
+| Layer | 機能 |
+|-------|------|
+| 入力ガード | 画像10MB制限、形式チェック、768pxリサイズ |
+| コスト上限 | Stage2 呼び出し上限 / セッション |
+| タイムアウト | periodic 10s / user_action 20s |
+| 出力サニタイズ | メッセージ長制限、injection対策、URL検証 |
+| 安全チェック | 危険キーワード検知、低確信度ブロック、最低滞在時間ガード |
+| Mobile | 適応的サンプリング (3s→10s→20s)、Stuck検知、TTS競合管理 |
+
+**設計原則: 安全なデフォルト** — タイムアウト/コスト超過/低確信度のどの場合も `continue` (現状維持) を返す。
+
+### プロンプト管理
+
+バージョン付きmdファイルで一元管理。コード変更なしでプロンプトを改善できる。
+
+```
+src/domain/guide/prompts/
+  periodic_stage1/v1.md     ← 定期判定
+  user_action_stage1/v1.md  ← ユーザー対話
+  stage2_escalation/v1.md   ← エスカレーション
+  plan_generation/v1.md     ← プラン自動生成
+  ...
+```
+
+---
 
 ## アーキテクチャ
 
 ```
-+---------------------------------------------+
-|  Mobile (React Native / Expo)               |
-|  - 音声トリガー (デバイス内キーワード検知)      |
-|  - カメラ静止画キャプチャ                      |
-|  - TTS 読み上げ                              |
-+---------------------------------------------+
-                    | REST API
-+---------------------------------------------+
-|  Backend (FastAPI)                          |
-|  - 軽量DDD Architecture                     |
-|  - LangChain + Claude 4.5 Sonnet            |
-|  - モード別プロンプト切替                      |
-+---------------------------------------------+
-                    |
-+---------------------------------------------+
-|  RAG (ChromaDB - ローカル)                   |
-|  - YouTube字幕テキスト保存                    |
-|  - コスト0のベクトルDB                        |
-+---------------------------------------------+
+┌─ Mobile (Expo) ─────────────────────────────────────┐
+│  CameraView → useAutonomousLoop (3s adaptive)       │
+│  useSpeechRecognition (14 VoiceIntents)             │
+│  useAgentState (Lock + TTS競合管理)                  │
+│  session_id + image/message だけ送信                 │
+└──────────────────────┬──────────────────────────────┘
+                       │ REST API (session_id ベース)
+┌─ Backend (FastAPI) ──┴──────────────────────────────┐
+│  routes/guide_router.py                             │
+│    /plan/* → session 作成 + session_id 返却          │
+│    /judge  → session からコンテキスト取得 → Pipeline   │
+│    /chat   → session から履歴取得 → Pipeline          │
+│                                                     │
+│  infrastructure/                                    │
+│    session/store.py  ← Valkey セッション管理          │
+│    agent/pipeline.py ← 統一2段階パイプライン           │
+│    agent/graph.py    ← LangGraph State Machine       │
+│    agent/tools.py    ← LangChain @tool               │
+│                                                     │
+│  domain/guide/                                      │
+│    model.py     ← ドメインモデル + 安全ルール          │
+│    service.py   ← プロンプト構築                      │
+│    prompts/     ← バージョン付きmdファイル             │
+│                                                     │
+│  common/                                            │
+│    telemetry.py ← OpenTelemetry                     │
+│    metrics.py   ← パイプラインメトリクス               │
+└─────────────────────────────────────────────────────┘
 ```
 
-## 技術スタック
-
-| レイヤー | 技術 |
-|---------|------|
-| **Mobile** | React Native, Expo (TypeScript), expo-camera, expo-speech, expo-speech-recognition |
-| **Backend** | FastAPI, Python 3.12, uv |
-| **LLM** | Gemma 4 (Ollama) / Claude Sonnet ([LLM戦略](./docs/llm-strategy.md)) |
-| **RAG** | Milvus Lite + BM25 ハイブリッド検索 ([RAG詳細](./docs/rag-architecture.md)) |
-| **自律エージェント** | LangGraph State Machine ([エージェント詳細](./docs/agent-architecture.md)) |
-| **API** | REST + SSE ストリーミング ([APIリファレンス](./docs/api-reference.md)) |
-| **アーキテクチャ** | 軽量DDD ([モバイル詳細](./docs/mobile-architecture.md)) |
-| **将来設計** | Claude エスカレーション, ColSmolVLM, パーソナライズ ([詳細](./docs/future-design.md)) |
-
-## ディレクトリ構造
+### ディレクトリ構造
 
 ```
 guidey/
 ├── backend/
-│   ├── pyproject.toml
-│   ├── scripts/                    # データパイプライン
-│   │   ├── ingest_pipeline.py      # YouTube→RAG (search/batch/url)
-│   │   └── feedback_batch.py       # 週次フィードバック反映
 │   ├── src/
-│   │   ├── main.py                 # FastAPI エントリポイント
-│   │   ├── config.py               # 環境変数・設定
-│   │   ├── common/                 # 共通ユーティリティ (json_utils等)
-│   │   ├── domain/guide/           # ドメイン層 (モデル・安全ルール・サービス)
-│   │   ├── application/guide/      # アプリケーション層 (UseCase・UIブロック・スキーマ)
-│   │   ├── infrastructure/         # インフラ層
-│   │   │   ├── agent/              #   LangGraph 2段階 State Machine
-│   │   │   ├── llm/                #   LLMクライアント (Ollama/Claude)
-│   │   │   ├── rag/                #   Milvus + BM25 ハイブリッド検索
-│   │   │   └── repositories/       #   リポジトリ (SQLite, ファイルシステム)
-│   │   └── routes/                 # APIルーター
-│   ├── static/                     # 静的ファイル (テストデータ, 動画フレーム)
-│   └── db/                         # データベース (.gitignore)
+│   │   ├── main.py
+│   │   ├── config.py
+│   │   ├── common/            # telemetry, metrics, json_utils
+│   │   ├── domain/guide/      # モデル, サービス, prompts/
+│   │   ├── application/guide/ # UseCase, UIブロック, スキーマ
+│   │   ├── infrastructure/
+│   │   │   ├── agent/         # pipeline, graph, tools
+│   │   │   ├── llm/           # Ollama / Claude クライアント
+│   │   │   ├── rag/           # Milvus + BM25 + embeddings
+│   │   │   └── repositories/  # SQLite, ファイルシステム
+│   │   └── routes/
+│   └── scripts/               # ingest_pipeline.py 等
 │
-├── mobile/                         # Expo (TypeScript)
-│   ├── app/                        # 画面 (tabs, goal, guide, settings)
-│   ├── hooks/                      # カスタムフック (API, 音声, 自律ループ)
-│   ├── components/                 # UIコンポーネント (BlockRenderer, Feedback等)
-│   └── types/                      # 型定義 (Plan, Block)
+├── mobile/
+│   ├── app/                   # guide.tsx, goal.tsx, settings.tsx
+│   ├── hooks/                 # useAutonomousLoop, useAgentState, useSpeechRecognition
+│   ├── components/            # BlockRenderer, blocks/, FeedbackButtons
+│   └── types/                 # Plan, Block
 │
-└── docs/                           # ドキュメント
+├── docs/                      # 詳細ドキュメント
+└── .env.example
 ```
+
+---
 
 ## セットアップ
 
-### 前提条件
-
-- Python 3.12+
-- uv ([インストール](https://docs.astral.sh/uv/getting-started/installation/))
-- Node.js 20+
-- Expo CLI
-- Ollama ([インストール](https://ollama.com/)) + Gemma 4 モデル
-
-### 1. Ollama + Gemma 4 セットアップ
-
-```bash
-brew install ollama
-brew services start ollama
-ollama pull gemma4
-```
-
-### 2. 環境変数を設定
-
 ```bash
 cp .env.example .env
-# デフォルトで Gemma 4 (ローカル, コスト0) を使用
-# Claude に切り替える場合は LLM_PROVIDER=anthropic に変更
-```
 
-### 3. Backend 起動
+# Ollama
+brew install ollama && brew services start ollama
+ollama pull gemma4:e2b
+ollama pull nomic-embed-text
 
-```bash
-cd backend
-uv sync
-uv run uvicorn src.main:app --reload --port 8000
-```
+# Valkey (セッション管理)
+brew install valkey && brew services start valkey
 
-API ドキュメント: http://localhost:8000/docs
+# Backend
+cd backend && uv sync
+uv run uvicorn src.main:app --host 0.0.0.0 --port 8000
 
-### 3. Mobile 起動（Expo Go）
-
-UI確認のみ。音声認識などネイティブモジュールは動作しない。
-
-```bash
-cd mobile
-npm install
+# Mobile
+cd mobile && npm install
 npx expo start
 ```
 
-### 4. Mobile 起動（Development Build / 実機）
+Development Build (実機テスト・音声認識) の詳細は [mobile-architecture.md](docs/mobile-architecture.md) を参照。
 
-音声認識（expo-speech-recognition）を含むフル機能テストには Development Build が必要。
+---
 
-#### 前提条件
+## ドキュメント
 
-- Xcode（iPhoneのiOSバージョンに対応するもの。iOS 26ベータなら Xcode 26ベータが必要）
-- USBケーブル（初回のみ）
-- iPhone と Mac が同じ Wi-Fi に接続されていること
-
-#### iPhone 側の準備
-
-1. **デベロッパモード有効化**: 設定 → プライバシーとセキュリティ → デベロッパモード → オン（再起動が必要）
-2. **USBで Mac に接続**: 「このコンピュータを信頼」を許可
-
-#### Xcode 署名設定
-
-```bash
-open mobile/ios/mobile.xcworkspace
-```
-
-1. 左パネルで mobile プロジェクトを選択
-2. TARGETS → mobile → Signing & Capabilities
-3. Team: Apple ID でログインし、自分のアカウントを選択
-4. Bundle Identifier が `com.guidey.app` になっていることを確認
-
-#### ビルド & 実行
-
-```bash
-cd mobile
-npx expo install expo-dev-client   # 初回のみ
-npx expo prebuild --clean          # 初回 or ネイティブ設定変更時
-npx expo run:ios --device
-```
-
-#### よくあるトラブル
-
-| 症状 | 対処 |
-|------|------|
-| `No code signing certificates` | Xcode で署名設定をする（上記手順） |
-| `Developer Mode disabled` | iPhone: 設定 → プライバシーとセキュリティ → デベロッパモード → オン |
-| `信頼されていないデベロッパ` | iPhone: 設定 → 一般 → VPNとデバイス管理 → 証明書を信頼 |
-| `developer disk image could not be mounted` | XcodeのバージョンがiOSに対応していない。Xcode更新が必要 |
-| `Error loading app` / 接続できない | iPhone: 設定 → プライバシーとセキュリティ → ローカルネットワーク → アプリを許可 |
-| Macのファイアウォール | 設定 → ネットワーク → ファイアウォール → オフにするか Node.js を許可 |
-
-## 開発ロードマップ
-
-### Step 1: MVP
-画像1枚 + ボタン操作で「対話」を成立させる。Gemma 4 (ローカル) でコスト0。
-
-### Step 2: 音声トリガー + オーバーレイUI
-ハンズフリー音声操作 + カメラ映像上にお手本画像やタイマーを半透明表示。
-
-### Step 3: 自律エージェント化
-自動キャプチャ + LangGraph + RAG (Milvus Lite) で、ユーザーが何も言わなくてもAIが作業を見守り自律的に指示する。
-
-詳細は [plan.md](./plan.md) を参照。
+| ドキュメント | 内容 |
+|------------|------|
+| [agent-architecture.md](docs/agent-architecture.md) | 自律エージェント、LangGraph、2段階パイプライン、ハーネス |
+| [rag-architecture.md](docs/rag-architecture.md) | RAGパイプライン、YouTube取り込み、ハイブリッド検索 |
+| [llm-strategy.md](docs/llm-strategy.md) | モデル使い分け、コスト戦略、プロバイダー切り替え |
+| [mobile-architecture.md](docs/mobile-architecture.md) | 画面構成、hooks、音声認識、UIブロック |
+| [api-architecture.md](docs/api-architecture.md) | Backend アーキテクチャ、レイヤー構成、リクエストフロー |
+| [future-design.md](docs/future-design.md) | 未実装の将来設計 |

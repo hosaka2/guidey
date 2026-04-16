@@ -8,6 +8,7 @@ export type PlanStep = {
 export type Plan = {
   source_id: string;
   title: string;
+  session_id: string;
   steps: PlanStep[];
 };
 

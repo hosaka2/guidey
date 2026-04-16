@@ -217,7 +217,7 @@ fused = reciprocal_rank_fusion([dense_results, bm25_results])
 
 ### 自律判定 (`judge_use_case.py`)
 - RAGは直接使わず、プラン (ステップリスト) をもとに判定
-- LangGraph State Machine で Observe → Appraise → Think → Safety Check → Act
+- LangGraph State Machine で observe → think (pipeline) → safety_check → act
 
 ---
 

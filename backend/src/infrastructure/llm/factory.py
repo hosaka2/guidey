@@ -15,12 +15,16 @@ def get_llm_client() -> LLMClient:
 
 
 def get_hq_llm_client() -> LLMClient:
-    """高品質版: RAG作成、プラン生成など精度重視."""
-    if settings.llm_provider == "anthropic":
-        from src.infrastructure.llm.claude import ClaudeClient
+    """高品質版: Stage 2 エスカレーション、RAG作成、プラン生成.
 
+    hq_provider が設定されていればそちらを優先。
+    未設定なら llm_provider にフォールバック。
+    """
+    provider = settings.hq_provider or settings.llm_provider
+
+    if provider == "anthropic":
+        from src.infrastructure.llm.claude import ClaudeClient
         return ClaudeClient()
 
     from src.infrastructure.llm.ollama import OllamaHQClient
-
     return OllamaHQClient()

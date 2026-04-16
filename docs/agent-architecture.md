@@ -1,310 +1,252 @@
 # 自律エージェント アーキテクチャ
 
-Guidey の自律エージェント (LangGraph State Machine) の設計と実装の詳細。
-
 ---
 
 ## 全体像
 
-ユーザーが何も操作しなくても、AIがカメラ越しに作業を見守り、適切なタイミングで指示を出す。
-
 ```
 ┌─ Mobile ─────────────────────────────────────────────┐
-│  useAutonomousLoop (5秒間隔、適応的)                    │
-│    カメラキャプチャ → POST /judge (画像送信)             │
-│    ← JudgeResponse (judgment + blocks)               │
-│    ↕ SharedState (plan, stepIndex, observations)      │
-│  useSpeechRecognition (常時リッスン)                    │
-│    音声Intent検出 → ステップ操作 / TTS制御              │
-└──────────────────────────────────────────────────────┘
-                    │ REST API (画像 + コンテキスト)
-┌─ Backend (LangGraph 2段階) ──────────────────────────┐
-│  Observe → Appraise → think_gemma → [can_handle?]    │
-│                                      ├ Yes → Safety → Act │
-│                                      └ No → think_hq → Safety → Act │
-└──────────────────────────────────────────────────────┘
+│  useAutonomousLoop (3秒間隔、適応的)                    │
+│    POST /judge (session_id + image のみ)               │
+│  useSpeechRecognition → POST /chat (session_id + msg)  │
+└──────────────────────┬───────────────────────────────┘
+                       │ REST API (session_id ベース)
+┌─ Backend ────────────┴───────────────────────────────┐
+│  Valkey: session:{id} → コンテキスト全管理              │
+│  /judge → session取得 → LangGraph → Pipeline → session更新 │
+│  /chat  → session取得 → Pipeline → session更新           │
+│                                                       │
+│  LangGraph: observe → think (pipeline) → safety → act  │
+│  Pipeline:  Stage 1 (fast) → [escalate?] → Stage 2    │
+└───────────────────────────────────────────────────────┘
 ```
 
 ---
 
-## LangGraph State Machine (2段階LLM)
+## 統一2段階パイプライン
 
-### ノード (6段)
-
-| ノード | 役割 | 処理内容 |
-|--------|------|---------|
-| **Observe** | 画像受信 | State に画像格納、ステップ開始時刻を記録 |
-| **Appraise** | 意味的変化検知 | 画像→Gemmaキャプション生成→embedding→前回との類似度比較。手ブレに強い |
-| **think_gemma** | Stage 1 判定 | Gemma e2b (高速) で3択判定 + can_handle + UIブロック出力 |
-| **think_hq** | Stage 2 判定 | Gemma 26b (高品質) でエスカレーション処理。将来Claude対応 |
-| **Safety Check** | 安全確認 | 危険キーワード→AlertBlock生成、低確信度anomalyブロック |
-| **Act** | 実行 | ログ + 中期メモリ更新 (完了ステップ所要時間) |
-
-### グラフ構造
-
-```
-Observe → Appraise → [変化あり?]
-                       ├─ No → END (LLM呼び出しスキップ、コスト節約)
-                       └─ Yes → think_gemma → [can_handle?]
-                                               ├─ Yes → Safety Check → Act → END
-                                               └─ No → think_hq → Safety Check → Act → END
-```
-
-### 2段階の判断フロー
-
-**Stage 1 (think_gemma)**: Gemma e2b, think=False, ~2秒
-- カメラ画像 + 現在のステップ情報で3択判定
-- 自分で処理できるかを自己判定 (`can_handle`)
-- UIブロック (テキスト、アラート等) も同時生成
-- 大半の判定 (80-90%) はここで完結
-
-**Stage 2 (think_hq)**: Gemma 26b, think=True, ~10秒 (将来: Claude)
-- Gemmaが `can_handle=false` でエスカレーションした場合のみ
-- より豊富なコンテキストで精度の高い判定
-- Tool Calling 対応 (set_timer, send_alert 等)
-
-### Gemma Stage 1 の出力スキーマ
-
-```json
-{
-  "judgment": "continue|next|anomaly",
-  "confidence": 0.0-1.0,
-  "message": "状況の説明",
-  "can_handle": true,
-  "escalation_reason": "",
-  "blocks": [
-    {"type": "text", "content": "いい感じです", "style": "emphasis"}
-  ]
-}
-```
-
-### エスカレーション基準 (Gemmaのプロンプトに記載)
-
-Gemmaが `can_handle=false` にするケース:
-- プラン全体の変更が必要
-- 複数の選択肢からの提案が必要
-- 安全に関わる重要判断
-- 判定に自信がない
-- ユーザーの意図が複雑
-
----
-
-## 変化検知 (Appraise)
-
-手持ちカメラはブレるため、ピクセル比較やファイルサイズ比較では使えない。
-**意味的変化検知**: 画像のキャプションを比較する。
-
-1. Gemma (VLM) で画像の1文キャプションを生成
-2. nomic-embed-text で埋め込み
-3. 前回キャプション embedding とコサイン類似度を計算
-4. **類似度 >= 0.90 → 変化なし** (手ブレ、同じ場面) → Think をスキップ
-5. **類似度 < 0.90 → 変化あり** → Think で判定
-
-メリット:
-- 手ブレに強い (意味的変化のみ検出)
-- 「同じ状態をずっと見ている」時のLLM判定の無駄呼び出しを削減
-
----
-
-## UIブロック
-
-LLMが返す構造化UI要素。モバイルアプリが描画する。
-
-| ブロック | 用途 | 例 |
-|---------|------|---|
-| TextBlock | テキスト表示 | 指示、アドバイス (normal/emphasis/warning) |
-| ImageBlock | 画像表示 | お手本画像 |
-| VideoBlock | 動画再生 | 該当シーン |
-| TimerBlock | タイマー | 煮込み3分 |
-| AlertBlock | 通知 | 危険警告 (info/warning/danger) |
-
-Safety Check で危険キーワード検出時は自動的に AlertBlock を追加。
-ブロックはチャット風に蓄積、バツボタンで消去可能。
-
----
-
-## State スキーマ (GuideState)
+定期判定 (periodic) とユーザー対話 (user_action) が**同じ関数**を共有。
 
 ```python
-class GuideState(TypedDict, total=False):
-    # 入力
-    image_bytes: bytes
-    current_step_index: int
-    plan_steps: list[PlanStep]
-    user_transcript: str
+result = await run_two_stage_pipeline(
+    input_data=PipelineInput(pipeline_type="periodic", ...),  # or "user_action"
+    guide_service=..., llm_client=..., hq_client=...,
+)
+```
 
-    # 短期メモリ
-    recent_observations: list[str]
+### Stage 1 (fast): Gemma e2b, ~1s
+- 定期判定: 3択 (continue/next/anomaly) + Proactive声かけ
+- ユーザー対話: 即応答 + ツール実行 (max_rounds=3)
+- `can_handle` で自己判定
 
-    # 中期メモリ
-    completed_steps: list[dict]
-    step_started_at: str
-    user_reports: list[str]
+### Stage 2 (deep): HQ / Claude, ~3-5s
+- エスカレーション時のみ実行
+- RAG検索 + プラン修正 + ツール実行 (max_rounds=5)
 
-    # 長期メモリ参照
-    user_id: str
-    user_preferences: dict
+### エスカレーション条件
 
-    # 変化検知
-    has_change: bool
-    last_caption: str
-    last_caption_embedding: list[float]
+| pipeline_type | 条件 | 設計意図 |
+|---------------|------|---------|
+| periodic | anomaly + can_handle=false | 速度優先。continue/next はスキップ |
+| user_action | can_handle=false | 正確性優先。常にエスカレーション |
 
-    # 2段階LLM
-    can_handle: bool
-    escalation_reason: str
-    escalated: bool
+**目標エスカレーション率**: periodic 5%以下 / user_action 10-20%
 
-    # UIブロック
-    blocks: list[dict]
+---
 
-    # ハーネス
-    safety_override: str
-    safety_reason: str
+## LangGraph State Machine
 
-    # モード
-    is_calibration: bool
+定期判定 (/judge) のフロー制御を担う。パイプラインへの橋渡し。
 
-    # 出力
-    judgment: str
-    confidence: float
-    message: str
+### ノード
+
+| ノード | 役割 | LLM |
+|--------|------|-----|
+| **observe** | エントリポイント | なし |
+| **think** | `run_two_stage_pipeline(periodic)` | Gemma + (HQ) |
+| **safety_check** | 安全確認 (4層) | なし |
+| **act** | ログ出力 | なし |
+
+```
+observe → think (pipeline) → safety_check → act → END
+```
+
+Appraise (意味的変化検知) は削除済み。LLM 2回呼び出しのオーバーヘッドが大きく、
+think 自体が continue を返すことで同等の効果を得られるため。
+
+---
+
+## セッション管理 (Valkey)
+
+Mobile は `session_id` + 画像/発話だけ送信。コンテキストは全て BE の Valkey セッションで管理。
+
+### セッションライフサイクル
+
+```
+/plan/generate or /plan/{id}
+  → session_id 発行 (UUID)
+  → Valkey に保存 (TTL 30分)
+  → レスポンスに session_id 含む
+      ↓
+/judge (session_id + image)
+  → session 取得 → observations, step_duration 等を自動参照
+  → 判定後: session.add_observation(), session.advance_step()
+      ↓
+/chat (session_id + message)
+  → session 取得 → chat_history, step 情報を自動参照
+  → 応答後: session.add_chat_message()
+      ↓
+30分無操作 → TTL 自動揮発
+```
+
+### Session データ構造
+
+```python
+Session:
+  session_id, plan_source_id, created_at
+  plan_steps: list[dict]       # ステップ一覧
+  total_steps: int
+  current_step_index: int      # BE が管理 (next 判定で +1)
+  step_started_at: str         # 滞在時間計算用
+  recent_observations: list    # 直近3件
+  chat_history: list           # 直近10件
+  total_calls, stage2_calls    # コスト管理
+```
+
+### 設計判断
+
+| 判断 | 理由 |
+|------|------|
+| Valkey (Redis互換) | マルチワーカー対応、永続化不要だが共有が必要 |
+| TTL 30分 | 作業セッションの平均時間。無操作で自動揮発 |
+| JSON シリアライズ | Hash より単純。1 session = 1 key |
+| ステップ進行は BE | Mobile は表示に専念。BE がsafety_check後にadvance |
+
+---
+
+## ハーネス (安全装置)
+
+**設計原則: 安全なデフォルト** — 全てのハーネスが発動した時のデフォルトは `continue` (現状維持)。
+
+### 7層構造
+
+```
+Layer 0: 入力ガード
+  画像 10MB / JPEG,PNG,WebP / 768pxリサイズ / step_index 境界チェック
+
+Layer 1: コスト上限
+  session_max_total_calls: 500 / session_max_stage2_calls: 30
+  超過 → continue + 利用上限メッセージ
+
+Layer 2: タイムアウト
+  periodic: 10s / user_action: 20s (asyncio.wait_for)
+  タイムアウト → continue
+
+Layer 3: 2段階パイプライン
+  Stage 1 max_rounds=3 / Stage 2 max_rounds=5
+  応答パース正規化 (confidence clamp, judgment正規化)
+
+Layer 4: 出力サニタイズ
+  メッセージ長 500文字 / ブロック数 5個
+  injection対策 (javascript:, <script, prompt leak)
+  URL検証 (http/https のみ)
+
+Layer 5: 安全チェック (safety_check ノード)
+  a. 危険キーワード検知 → AlertBlock (火, 刃物, 高所, 電気, 熱い)
+  b. anomaly + conf < 0.5 → continue にダウングレード
+  c. 最低滞在時間ガード → 直前ステップが10秒未満なら next ブロック
+  d. 高速スキップ検知 → 連続2ステップが10秒未満 → AlertBlock
+  e. 最終ステップ超え防止
+
+Layer 6: Mobile ハーネス
+  適応的サンプリング (3s → 10s → 20s)
+  Stuck検知 (continue 15回 → 自動介入)
+  Lock (judge/chat 排他制御)
+  TTS競合 (warn のみ割り込み可)
+  Mode切替 (会話中は定期発話抑制)
 ```
 
 ---
 
-## 3-Tier Memory
+## 観測性
 
-| 層 | 保持期間 | 内容 | 実装 |
-|----|---------|------|------|
-| **短期** | 直近3件 | 判定メッセージ | `recent_observations` (State内リスト) |
-| **中期** | セッション中 | 完了ステップ、所要時間 | `completed_steps` (State内リスト) |
-| **長期** | 永続 | ユーザー嗜好、失敗履歴 | SQLite (将来) |
+### OpenTelemetry
 
----
-
-## 安全確認 (ハーネス層)
-
-### 危険キーワード検出
-
-次のステップに進む際、テキストに以下が含まれれば AlertBlock を自動生成:
-
-| キーワード | 警告 |
+| Instrument | 内容 |
 |-----------|------|
-| 火 | 火を使う作業です。換気と消火器の確認を。 |
-| 刃物 | 刃物を使います。手元に注意してください。 |
-| 高所 | 高所での作業です。足場を確認してください。 |
-| 電気 | 電気系統の作業です。ブレーカーを確認してください。 |
-| 熱い | 高温注意。やけどに気をつけてください。 |
-| 危険 | 危険な作業が検出されました。 |
+| `pipeline.run` span | パイプライン全体 (type, step, total_ms, escalated) |
+| `pipeline.stage1` span | Stage 1 (latency_ms, judgment, confidence, tools) |
+| `pipeline.stage2` span | Stage 2 (latency_ms, escalation_reason, tools) |
+| `pipeline.calls` counter | 呼び出し数 (type, judgment) |
+| `pipeline.escalations` counter | エスカレーション数 |
+| `pipeline.latency_ms` histogram | レイテンシ分布 |
+| `pipeline.errors` counter | エラー数 |
+| `pipeline.timeouts` counter | タイムアウト数 |
 
-### 低確信度ブロック
-
-`anomaly` 判定で `confidence < 0.5` → `continue` に変更 (誤報を抑制)。
-
----
-
-## 判定プロンプト (状態固定方式)
-
-LLMに工程を自由推測させず、現在のステップを固定して3択で判定させる。
-
-```
-現在のステップ: {step_name}
-次のステップ: {next_step_name}
-直近の観察: {recent_observations}
-
-画像を見て3択: continue / next / anomaly
-加えて can_handle (自信があるか) と blocks (UIブロック) も出力。
-```
-
----
-
-## キャリブレーション
-
-自律モード開始時に、カメラ画像から「今どのステップにいるか」を推定。
-
-```
-POST /judge?is_calibration=true
-```
-
-LLMに全ステップリストと画像を渡し、最も合致するステップ番号を返す。
-
----
-
-## モバイル側: 自律ループ
-
-### useAutonomousLoop
-
-```
-[タイマー発火] → カメラキャプチャ → POST /judge (画像送信)
-  ← JudgeResponse (judgment + blocks)
-  → "continue" → 間隔維持 or 延長
-  → "next" (2回連続) → ステップ進行 + TTS + ブロック表示
-  → "anomaly" → 警告TTS + ブロック表示
-```
-
-適応的サンプリング: 5秒 → 15秒 → 30秒 (変化なし連続時)
-ヒステリシス: 2回連続 "next" でステップ進行
-
----
-
-## 音声Intent (12種)
-
-| カテゴリ | Intent | トリガーワード |
-|---------|--------|-------------|
-| 操作 | capture | 教えて |
-| 操作 | next_step | 次、できた、オッケー |
-| 操作 | previous_step | 戻して、前 |
-| 操作 | skip | スキップ |
-| 制御 | stop | ストップ、止めて |
-| 制御 | pause | 待って |
-| 制御 | resume | 再開、続き |
-| 制御 | repeat | もう一回 |
-| 対話 | question | これでいい、大丈夫 |
-| 対話 | report_status | 切った、終わった |
-| 対話 | request_help | 分からない、助けて |
-| - | unknown | (4文字以上の不明発話) |
-
-キーワードマッチで即応答 (LLM不要)。将来: unknownはGemma→Claudeの2段階で分類。
-
----
-
-## Tool Calling
-
-Stage 2 (think_hq) で利用可能なツール:
-
-| ツール | 用途 | 戻り値 |
-|--------|------|--------|
-| set_timer | タイマーセット | TimerBlock |
-| send_alert | 警告通知 | AlertBlock |
-| show_image | 画像表示 | ImageBlock |
-| show_text | テキスト表示 | TextBlock |
-
-現在はプロンプト内でJSON出力させる方式。将来 `bind_tools` に移行予定。
-
----
-
-## API エンドポイント
-
-| メソッド | パス | 用途 |
-|---------|------|------|
-| POST | `/guide/analyze/stream` | 手動解析 (SSEストリーミング) |
-| POST | `/guide/plan/generate` | プラン自動生成 |
-| GET | `/guide/plan/{source_id}` | プラン取得 |
-| POST | `/guide/judge` | 自律判定 (2段階LLM + UIブロック) |
-
-### JudgeResponse
+### GET /metrics
 
 ```json
 {
-  "judgment": "next",
-  "confidence": 0.85,
-  "message": "ステップ完了",
-  "current_step_index": 2,
-  "blocks": [{"type": "text", "content": "次に進みます", "style": "emphasis"}],
-  "escalated": false
+  "total_calls": 45,
+  "total_stage2_calls": 3,
+  "periodic": {
+    "count": 42, "escalation_rate": 0.048,
+    "latency_p50": 850, "latency_p95": 1200,
+    "judgments": {"continue": 35, "next": 5, "anomaly": 2}
+  },
+  "user_action": {
+    "count": 3, "escalation_rate": 0.333,
+    "latency_p50": 2100
+  }
 }
 ```
+
+### LangSmith
+
+環境変数3行で自動トレース (コード変更なし):
+```
+LANGCHAIN_TRACING_V2=true
+LANGCHAIN_API_KEY=lsv2_pt_xxx
+LANGCHAIN_PROJECT=guidey
+```
+
+---
+
+## プロンプト管理
+
+バージョン付きmdファイルで一元管理。
+
+```
+src/domain/guide/prompts/
+  periodic_stage1/v1.md     ← 定期判定 (Proactive)
+  user_action_stage1/v1.md  ← ユーザー対話
+  stage2_escalation/v1.md   ← 共通 Stage2
+  plan_generation/v1.md     ← プラン自動生成
+  calibration/v1.md         ← キャリブレーション
+  analyze_oneshot/v1.md     ← 1ショット解析
+```
+
+```python
+from src.domain.guide.prompt_loader import Prompt, render
+render(Prompt.PERIODIC_STAGE1, step_number="3", ...)
+```
+
+バージョン切り替えは `PROMPT_VERSIONS` 定数のみ。
+
+---
+
+## Mobile: 結果表示ルール
+
+| 判定 | 指示カード | ブロックカード | TTS |
+|------|-----------|--------------|-----|
+| continue (message空) | 変更なし | 変更なし | なし |
+| continue (messageあり) | 変更なし | TextBlock (Proactive) | advise |
+| next | ステップ更新 | blocks表示 | transition |
+| anomaly | **変更なし** | AlertBlock | warn (割り込み) |
+| chat応答 | 変更なし | 応答表示 | respond |
+| stuck (10回continue) | 変更なし | AlertBlock (info) | advise |
+
+**指示カードは「今やるべきこと」を常に保持。** anomaly やチャットで上書きしない。
 
 ---
 
@@ -312,33 +254,38 @@ Stage 2 (think_hq) で利用可能なツール:
 
 ```
 backend/src/
+├── common/
+│   ├── telemetry.py           # OpenTelemetry 初期化
+│   └── metrics.py             # OTel instruments + /metrics集計
 ├── domain/guide/
-│   ├── model.py           # ドメインモデル + 安全ルール (check_step_safety)
-│   └── service.py         # プロンプト構築
+│   ├── model.py               # ドメインモデル + 安全ルール + 出力サニタイズ
+│   ├── service.py             # プロンプト構築 (Prompt定数経由)
+│   ├── prompt_loader.py       # md読み込み + バージョン管理
+│   └── prompts/               # バージョン付きmdファイル
 ├── application/guide/
-│   ├── blocks.py          # UIブロック型 (Text, Image, Video, Timer, Alert)
-│   ├── judge_use_case.py  # 自律判定 (LangGraph呼び出し)
-│   ├── plan_use_case.py   # プラン自動生成 (Multi-Document Synthesis)
-│   └── schemas.py         # JudgeResponse (blocks, escalated 含む)
+│   ├── blocks.py              # UIブロック型
+│   ├── judge_use_case.py      # /judge (LangGraph経由)
+│   ├── chat_use_case.py       # /chat (Pipeline直接)
+│   └── schemas.py             # JudgeResponse, ChatResponse
 ├── infrastructure/
+│   ├── session/
+│   │   ├── store.py           # ValkeySessionStore (create/get/save/delete)
+│   │   └── models.py          # Session dataclass
 │   ├── agent/
-│   │   ├── graph.py       # LangGraph 2段階 State Machine
-│   │   └── tools.py       # ツール定義 (set_timer, send_alert 等)
-│   └── repositories/
-│       ├── feedback_repository.py  # SqliteFeedbackRepository
-│       └── plan_repository.py      # FilePlanRepository
+│   │   ├── pipeline.py        # 統一2段階パイプライン (ハーネス内蔵)
+│   │   ├── graph.py           # LangGraph (observe→think→safety→act)
+│   │   └── tools.py           # LangChain @tool (timer, alert, rag, modify_step)
 
 mobile/
 ├── hooks/
-│   ├── useAutonomousLoop.ts    # 自律ループ (キャプチャ→judge→ブロック表示)
-│   ├── useSpeechRecognition.ts # 音声Intent (14種)
-│   └── useJudgeApi.ts          # Judge API + Plan生成 API
+│   ├── useAutonomousLoop.ts   # 自律ループ (session_id で通信)
+│   ├── useAgentState.ts       # Lock + TTS競合管理
+│   ├── useSpeechRecognition.ts
+│   └── useJudgeApi.ts         # callJudge(session_id + image), callChat(session_id + msg)
 ├── components/
-│   ├── BlockRenderer.tsx       # ブロック描画 (switch by type)
-│   ├── FeedbackButtons.tsx     # 👍👎 フィードバック
-│   ├── StepFeedback.tsx        # 😊😐😞 ステップ評価
-│   └── blocks/                 # 個別ブロック (Text, Image, Video, Timer, Alert)
+│   ├── BlockRenderer.tsx      # ブロック描画
+│   └── blocks/                # Text, Image, Video, Timer, Alert
 └── types/
-    ├── blocks.ts               # Block 型定義
-    └── plan.ts                 # Plan, JudgeResponse 型
+    ├── blocks.ts
+    └── plan.ts
 ```

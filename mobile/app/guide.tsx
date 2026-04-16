@@ -28,14 +28,13 @@ import Animated, {
 import { CameraView, CameraViewHandle } from "@/components/CameraView";
 import { useGuideApi } from "@/hooks/useGuideApi";
 import { useAutonomousLoop } from "@/hooks/useAutonomousLoop";
+import { useAgentState, type SpeakType } from "@/hooks/useAgentState";
 import { callChat } from "@/hooks/useJudgeApi";
 import {
   useSpeechRecognition,
   type VoiceIntent,
 } from "@/hooks/useSpeechRecognition";
 import { useApiContext } from "@/contexts/ApiContext";
-import { GuideModeType } from "@/constants/Config";
-import { MODES, type ModeKey } from "@/constants/modes";
 import type { PlanStep } from "@/types/plan";
 import type { Block } from "@/types/blocks";
 import { BlockRenderer } from "@/components/BlockRenderer";
@@ -48,8 +47,7 @@ const REF_MIN_SCALE = 1;
 const REF_MAX_SCALE = 3;
 
 export default function GuideScreen() {
-  const { mode, goal, planId } = useLocalSearchParams<{
-    mode: string;
+  const { goal, planId } = useLocalSearchParams<{
     goal: string;
     planId: string;
   }>();
@@ -72,7 +70,6 @@ export default function GuideScreen() {
     setSteps,
   } = useGuideApi();
 
-  const modeConfig = MODES[(mode as ModeKey) ?? "diy"] ?? MODES.diy;
   const [instructionCollapsed, setInstructionCollapsed] = useState(false);
   const [stepsExpanded, setStepsExpanded] = useState(false);
   const [voiceEnabled, setVoiceEnabled] = useState(true);
@@ -117,6 +114,8 @@ export default function GuideScreen() {
   const toggleAutonomousRef = useRef<() => void>(() => {});
   const pauseForTTSRef = useRef<() => void>(() => {});
   const resumeAfterTTSRef = useRef<() => void>(() => {});
+  const agentSpeakRef = useRef<(msg: string, src: "periodic" | "user_action", speakType?: SpeakType) => boolean>(() => false);
+  const sendChatRef = useRef<(msg: string) => void>(() => {});
   const isAutonomousRef = useRef(false);
 
   const handleVoiceTrigger = useCallback(
@@ -145,25 +144,14 @@ export default function GuideScreen() {
           break;
         case "repeat":
           if (lastInstructionRef.current) {
-            pauseForTTSRef.current();
             const plain = lastInstructionRef.current.replace(/[#*_`~>\-]/g, "").replace(/\n+/g, "。");
-            Speech.speak(plain, {
-              language: "ja",
-              rate: 1.1,
-              onDone: () => resumeAfterTTSRef.current(),
-              onStopped: () => resumeAfterTTSRef.current(),
-              onError: () => resumeAfterTTSRef.current(),
-            });
+            agentSpeakRef.current(plain, "user_action", "respond");
           }
           break;
         case "question":
-          if (!isLoading) handleCaptureRef.current?.();
-          break;
         case "report_status":
-          console.log(`[Voice] report: ${raw}`);
-          break;
         case "request_help":
-          if (!isLoading) handleCaptureRef.current?.();
+          if (!isLoading && raw) sendChatRef.current(raw);
           break;
         case "feedback_positive":
         case "feedback_negative":
@@ -174,7 +162,10 @@ export default function GuideScreen() {
           );
           break;
         default:
-          console.log(`[Voice] unknown intent: ${raw}`);
+          // キーワードにマッチしない発話 → chat に送る
+          if (raw && raw.length >= 4) {
+            sendChatRef.current(raw);
+          }
           break;
       }
     },
@@ -188,7 +179,24 @@ export default function GuideScreen() {
   pauseForTTSRef.current = pauseForTTS;
   resumeAfterTTSRef.current = resumeAfterTTS;
 
-  // --- 自律モード ---
+  // --- SharedState: 競合管理 ---
+  const {
+    acquireLock,
+    releaseLock,
+    speak: agentSpeak,
+    registerTTSCallbacks,
+    enterConversation,
+    exitConversation,
+  } = useAgentState();
+
+  // ref同期 (agentSpeak — 宣言順序の問題回避)
+  agentSpeakRef.current = agentSpeak;
+
+  // TTS ↔ 音声認識の連携を登録
+  useEffect(() => {
+    registerTTSCallbacks(pauseForTTS, resumeAfterTTS);
+  }, [registerTTSCallbacks, pauseForTTS, resumeAfterTTS]);
+
   // --- フィードバック ---
   const sendFeedback = useCallback(
     (sentiment: string, source: string, raw?: string) => {
@@ -236,36 +244,46 @@ export default function GuideScreen() {
       // UIブロック表示
       showBlocks(blocks);
 
-      // TTS読み上げ
-      pauseForTTS();
-      const plain = `ステップ${step.step_number}。${step.text}`;
-      Speech.speak(plain, {
-        language: "ja",
-        rate: 1.1,
-        onDone: () => resumeAfterTTS(),
-        onStopped: () => resumeAfterTTS(),
-        onError: () => resumeAfterTTS(),
-      });
+      // TTS読み上げ (agentSpeak で競合管理)
+      const prefix = message ? `${message}。` : "";
+      const plain = `${prefix}ステップ${step.step_number}。${step.text}`;
+      agentSpeak(plain, "periodic", "transition");
     },
-    [apiUrl, pauseForTTS, resumeAfterTTS, setLastInstruction, setCurrentStep, setReferenceImageUrl, showBlocks]
+    [apiUrl, agentSpeak, setLastInstruction, setCurrentStep, setReferenceImageUrl, showBlocks]
   );
 
   const handleAnomaly = useCallback(
     (message: string, blocks: Block[] = []) => {
-      setLastInstruction(`⚠️ ${message || "何かお困りですか？"}`);
-      setInstructionCollapsed(false);
-      showBlocks(blocks);
+      // 指示カードは変更しない (現在のステップ指示を維持)
+      // anomaly はブロックカード + TTS で通知
+      const anomalyBlocks: Block[] = [
+        { type: "alert", message: message || "何かお困りですか？", severity: "warning" },
+        ...blocks,
+      ];
+      showBlocks(anomalyBlocks);
 
-      pauseForTTS();
-      Speech.speak(message || "何かお困りですか？", {
-        language: "ja",
-        rate: 1.1,
-        onDone: () => resumeAfterTTS(),
-        onStopped: () => resumeAfterTTS(),
-        onError: () => resumeAfterTTS(),
-      });
+      // warn で割り込み可能
+      agentSpeak(message || "何かお困りですか？", "periodic", "warn");
     },
-    [pauseForTTS, resumeAfterTTS, setLastInstruction, showBlocks]
+    [agentSpeak, showBlocks]
+  );
+
+  // --- Proactive message: AIが自発的に声をかける ---
+  const handleProactiveMessage = useCallback(
+    (message: string, blocks: Block[] = []) => {
+      console.log(`[Guide] 💬 proactive: ${message.slice(0, 40)}`);
+
+      // ブロックカードに表示 (AI発言として)
+      const aiBlocks: Block[] = [
+        { type: "text", content: message, style: "normal" },
+        ...blocks,
+      ];
+      showBlocks(aiBlocks);
+
+      // advise で控えめに (会話モード中は抑制される)
+      agentSpeak(message, "periodic", "advise");
+    },
+    [agentSpeak, showBlocks]
   );
 
   const {
@@ -280,8 +298,11 @@ export default function GuideScreen() {
     cameraRef,
     apiUrl,
     planSourceId: planId ?? "",
+    acquireLock,
+    releaseLock,
     onStepAdvanced: handleStepAdvanced,
     onAnomaly: handleAnomaly,
+    onProactiveMessage: handleProactiveMessage,
   });
 
   // ref同期 (自律モード関数)
@@ -317,36 +338,28 @@ export default function GuideScreen() {
 
   // 共通: LLM応答をブロックカードに表示 + TTS
   const handleLLMResponse = useCallback(
-    (fullText: string | null, triggerWord: string) => {
+    (fullText: string | null, _triggerWord: string) => {
       if (fullText) {
-        // ブロックカードに追加
         showBlocks([{ type: "text", content: fullText, style: "normal" } as Block]);
-        // TTS
-        const plain = fullText.replace(/[#*_`~>\-]/g, "").replace(/\n+/g, "。");
-        Speech.speak(plain, {
-          language: "ja",
-          rate: 1.1,
-          onDone: () => resumeAfterTTS(),
-          onStopped: () => resumeAfterTTS(),
-          onError: () => resumeAfterTTS(),
-        });
-      } else {
-        resumeAfterTTS();
+        agentSpeak(fullText, "user_action", "respond");
       }
     },
-    [resumeAfterTTS, showBlocks]
+    [agentSpeak, showBlocks]
   );
 
-  // /guide/chat 経由でユーザー対話 (tool calling + 2段階LLM)
+  // /guide/chat 経由でユーザー対話 (統一パイプライン user_action)
   const sendChat = useCallback(async (userMsg: string, withImage: boolean = true) => {
+    enterConversation();
+    acquireLock();
+
     showBlocks([{ type: "text", content: `💬 ${userMsg}`, style: "emphasis" } as Block]);
 
     const uri = withImage ? await cameraRef.current?.takePicture() : null;
     try {
+      // session_id + message のみ。コンテキストは BE が管理。
       const result = await callChat(
         apiUrl, userMsg, uri ?? null,
-        autonomousPlan?.source_id ?? "",
-        autoStepIndex,
+        autonomousPlan?.session_id ?? "",
       );
 
       const blocks: Block[] = result.blocks || [];
@@ -356,20 +369,16 @@ export default function GuideScreen() {
       showBlocks(blocks);
 
       if (result.message) {
-        pauseForTTS();
-        const plain = result.message.replace(/[#*_`~>\-]/g, "").replace(/\n+/g, "。");
-        Speech.speak(plain, {
-          language: "ja", rate: 1.1,
-          onDone: () => resumeAfterTTS(),
-          onStopped: () => resumeAfterTTS(),
-          onError: () => resumeAfterTTS(),
-        });
+        agentSpeak(result.message, "user_action", "respond");
       }
     } catch (err) {
       console.warn("[Chat] error:", err);
       showBlocks([{ type: "alert", message: "エラーが発生しました", severity: "warning" } as Block]);
+    } finally {
+      releaseLock();
+      setTimeout(() => exitConversation(), 3000);
     }
-  }, [apiUrl, autonomousPlan, autoStepIndex, pauseForTTS, resumeAfterTTS, showBlocks]);
+  }, [apiUrl, autonomousPlan, agentSpeak, showBlocks, acquireLock, releaseLock, enterConversation, exitConversation]);
 
   const handleCapture = useCallback(async () => {
     showBlocks([{ type: "text", content: "📷 解析中...", style: "emphasis" } as Block]);
@@ -382,12 +391,13 @@ export default function GuideScreen() {
       const uri = await cameraRef.current?.takePicture();
       if (!uri) return;
       pauseForTTS();
-      const fullText = await analyzeStream(uri, (mode ?? "diy") as GuideModeType, "教えて", goal ?? "");
+      const fullText = await analyzeStream(uri, "教えて", goal ?? "");
       handleLLMResponse(fullText, "教えて");
     }
-  }, [planId, sendChat, mode, goal, analyzeStream, pauseForTTS, handleLLMResponse, showBlocks]);
+  }, [planId, sendChat, goal, analyzeStream, pauseForTTS, handleLLMResponse, showBlocks]);
 
   handleCaptureRef.current = handleCapture;
+  sendChatRef.current = sendChat;
 
   const handleTextSubmit = useCallback(async () => {
     const text = textInputValue.trim();
@@ -421,7 +431,7 @@ export default function GuideScreen() {
           </Pressable>
           <View flex={1}>
             <Text color="#fff" fontSize="$6" fontWeight="700" numberOfLines={1}>
-              {modeConfig.labelWithMode}
+              Guidey
             </Text>
             {goal ? (
               <Text
@@ -492,7 +502,7 @@ export default function GuideScreen() {
                       flexDirection="row"
                       alignItems="center"
                       gap="$1"
-                      backgroundColor={modeConfig.color}
+                      backgroundColor={"#FF6B35"}
                       borderRadius="$2"
                       paddingHorizontal="$2"
                       paddingVertical="$1"
@@ -547,7 +557,7 @@ export default function GuideScreen() {
                         width={24}
                         height={24}
                         borderRadius={12}
-                        backgroundColor={isActive ? modeConfig.color : "#ccc"}
+                        backgroundColor={isActive ? "#FF6B35" : "#ccc"}
                         alignItems="center"
                         justifyContent="center"
                       >

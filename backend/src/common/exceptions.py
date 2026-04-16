@@ -8,10 +8,5 @@ class ValidationError(DomainException):
     pass
 
 
-class UnsupportedModeError(ValidationError):
-    def __init__(self, mode: str):
-        super().__init__(f"Unsupported guide mode: {mode}")
-
-
 class LLMError(DomainException):
     pass

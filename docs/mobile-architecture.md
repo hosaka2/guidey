@@ -36,7 +36,8 @@ settings.tsx       → API URL 設定
 | Hook | 役割 |
 |------|------|
 | `useGuideApi` | SSEストリーミング、手動解析 |
-| `useAutonomousLoop` | 自律キャプチャ→判定ループ |
+| `useAutonomousLoop` | 自律キャプチャ→判定ループ、Stuck検知 |
+| `useAgentState` | SharedState、Lock (judge/chat排他)、TTS競合管理、会話モード切替 |
 | `useSpeechRecognition` | 音声Intent検出、TTS連携 |
 
 ### 状態管理
@@ -111,15 +112,17 @@ XMLHttpRequest の `readyState >= 3` (LOADING) でプログレッシブにデー
 ### 適応的サンプリング
 
 ```
-変化あり:   5秒間隔 (アクティブ)
-3回変化なし: 15秒間隔 (スロー)
-6回変化なし: 30秒間隔 (待機)
-next/anomaly: 5秒にリセット
+変化あり:    3秒間隔 (アクティブ)
+5回変化なし:  10秒間隔 (スロー)
+10回変化なし: 20秒間隔 (待機)
+next/anomaly: 3秒にリセット
 ```
 
-### ヒステリシス
+Backend 側の safety_check (最低滞在時間ガード + 高速スキップ検知) がガードしているため、Mobile 側の Hysteresis は不要。`next` 判定は即座にステップ進行。
 
-2回連続で `next` 判定が出て初めてステップを進行。1回だけの `next` は無視（ブレ防止）。
+### Stuck検知
+
+continue が15回連続 (約45秒) → 「大丈夫ですか？」と自動介入。
 
 ### ステップ進行時の処理
 
