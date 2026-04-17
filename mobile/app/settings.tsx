@@ -1,19 +1,19 @@
 import { useState } from "react";
-import { TextInput, StyleSheet, Pressable } from "react-native";
-import { View, Text } from "@tamagui/core";
+import { TextInput, StyleSheet } from "react-native";
+
+import { Pressable, Text, View } from "@/components/ui";
 import { useApiContext } from "@/contexts/ApiContext";
-import { useGuideApi } from "@/hooks/useGuideApi";
+import { testConnection } from "@/lib/api";
 
 export default function SettingsScreen() {
   const { apiUrl, setApiUrl } = useApiContext();
-  const { testConnection } = useGuideApi();
   const [status, setStatus] = useState<"idle" | "testing" | "ok" | "error">(
     "idle"
   );
 
   const handleTest = async () => {
     setStatus("testing");
-    const ok = await testConnection();
+    const ok = await testConnection(apiUrl);
     setStatus(ok ? "ok" : "error");
   };
 

@@ -1,7 +1,7 @@
 import { Pressable } from "react-native";
 import { View, Text } from "@tamagui/core";
 import { Feather } from "@expo/vector-icons";
-import type { VideoBlock } from "@/types/blocks";
+import type { VideoBlock } from "@/lib/types";
 
 export function VideoBlockView({ block }: { block: VideoBlock }) {
   return (

@@ -1,10 +1,14 @@
 import base64
 from collections.abc import AsyncIterator
-from typing import Protocol
+from typing import Protocol, TypeVar
 
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import HumanMessage, ToolMessage
 from langchain_core.tools import BaseTool
+from langgraph.prebuilt import create_react_agent
+from pydantic import BaseModel
+
+T = TypeVar("T", bound=BaseModel)
 
 
 class LLMClient(Protocol):
@@ -16,21 +20,44 @@ class LLMClient(Protocol):
 
     async def generate_text(self, system_prompt: str) -> str: ...
 
-    async def call_with_tools(
+    async def call_structured(
+        self, system_prompt: str, schema: type[T],
+        image_bytes: bytes | None = None,
+    ) -> T:
+        """Structured Output で呼び出し。Pydantic インスタンスを返す。"""
+        ...
+
+    async def call_react_agent(
         self, system_prompt: str, tools: list[BaseTool],
-        image_bytes: bytes | None = None, max_rounds: int = 5,
-    ) -> tuple[str, list[dict]]:
-        """ツール付きで呼び出し。戻り値: (最終テキスト, 実行されたツール結果リスト)."""
+        response_schema: type[T],
+        image_bytes: bytes | None = None,
+    ) -> tuple[T, list[dict]]:
+        """LangGraph create_react_agent でツールループ。戻り値: (構造化応答, tool アーティファクト)."""
         ...
 
 
 class BaseLangChainClient:
-    """LangChain BaseChatModel を使う LLMClient の共通実装."""
+    """LangChain BaseChatModel を使う LLMClient の共通実装.
+
+    サブクラスで `_supports_prompt_caching = True` にすると、
+    system_prompt 部分に `cache_control: {"type":"ephemeral"}` を付与して
+    プロバイダー側のプロンプトキャッシュ (Anthropic Claude 等) を有効化する。
+    """
 
     _model: BaseChatModel
+    _supports_prompt_caching: bool = False  # サブクラスで上書き
 
-    def _build_message(self, image_bytes: bytes, system_prompt: str) -> HumanMessage:
-        content: list[dict] = [{"type": "text", "text": system_prompt}]
+    def _build_message(self, image_bytes: bytes | None, system_prompt: str) -> HumanMessage:
+        text_block: dict = {"type": "text", "text": system_prompt}
+        if self._supports_prompt_caching:
+            # Anthropic: 同一の長い prompt を繰り返すときトークン量を 10x 削減
+            text_block["cache_control"] = {"type": "ephemeral"}
+
+        # 画像なしで cache_control も不要なら素の文字列で軽量に
+        if not image_bytes and not self._supports_prompt_caching:
+            return HumanMessage(content=system_prompt)
+
+        content: list[dict] = [text_block]
         if image_bytes:
             image_b64 = base64.b64encode(image_bytes).decode("utf-8")
             content.append(
@@ -55,46 +82,40 @@ class BaseLangChainClient:
                 yield str(chunk.content)
 
     async def generate_text(self, system_prompt: str) -> str:
-        message = HumanMessage(content=system_prompt)
+        # 画像なしパスも _build_message 経由にして prompt caching を一貫適用
+        message = self._build_message(None, system_prompt)
         response = await self._model.ainvoke([message])
         return str(response.content)
 
-    async def call_with_tools(
+    async def call_structured(
+        self, system_prompt: str, schema: type[T],
+        image_bytes: bytes | None = None,
+    ) -> T:
+        structured = self._model.with_structured_output(schema)
+        message = self._build_message(image_bytes, system_prompt)
+        result = await structured.ainvoke([message])
+        return result  # type: ignore[return-value]
+
+    async def call_react_agent(
         self, system_prompt: str, tools: list[BaseTool],
-        image_bytes: bytes | None = None, max_rounds: int = 5,
-    ) -> tuple[str, list[dict]]:
-        """ツール付き呼び出し。LLMがツール呼び出しを要求→実行→結果を返すループ。"""
-        model_with_tools = self._model.bind_tools(tools)
-        tool_map = {t.name: t for t in tools}
+        response_schema: type[T],
+        image_bytes: bytes | None = None,
+    ) -> tuple[T, list[dict]]:
+        agent = create_react_agent(
+            self._model,
+            tools=tools,
+            response_format=response_schema,
+        )
+        message = self._build_message(image_bytes, system_prompt)
+        result = await agent.ainvoke({"messages": [message]})
 
-        # 初期メッセージ
-        if image_bytes:
-            messages = [self._build_message(image_bytes, system_prompt)]
-        else:
-            messages = [HumanMessage(content=system_prompt)]
+        # ToolMessage.artifact から block を収集
+        artifacts: list[dict] = []
+        for m in result.get("messages", []):
+            if isinstance(m, ToolMessage):
+                art = getattr(m, "artifact", None)
+                if isinstance(art, dict) and "type" in art:
+                    artifacts.append(art)
 
-        tool_results: list[dict] = []
-
-        for _ in range(max_rounds):
-            response = await model_with_tools.ainvoke(messages)
-            messages.append(response)
-
-            # ツール呼び出しがなければ終了
-            if not response.tool_calls:
-                return str(response.content), tool_results
-
-            # ツール実行
-            for tc in response.tool_calls:
-                tool_name = tc["name"]
-                tool_args = tc["args"]
-                fn = tool_map.get(tool_name)
-                if fn:
-                    result = fn.invoke(tool_args)
-                    tool_results.append(result)
-                    messages.append(
-                        ToolMessage(content=str(result), tool_call_id=tc["id"])
-                    )
-
-        # max_rounds 到達
-        final = messages[-1]
-        return str(getattr(final, "content", "")), tool_results
+        structured: T = result["structured_response"]
+        return structured, artifacts

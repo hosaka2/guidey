@@ -1,6 +1,6 @@
 import { Image, StyleSheet } from "react-native";
 import { View, Text } from "@tamagui/core";
-import type { ImageBlock } from "@/types/blocks";
+import type { ImageBlock } from "@/lib/types";
 
 export function ImageBlockView({ block }: { block: ImageBlock }) {
   return (

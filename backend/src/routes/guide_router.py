@@ -1,3 +1,14 @@
+"""/guide/* ルータ.
+
+責務:
+  - 入力検証 (画像 MIME/サイズ、リサイズ)
+  - UseCase の呼び出し (ルータは常に UseCase を通す、pass-through でも統一)
+  - SSE ラッピング
+
+業務ロジックは application/guide/*_use_case.py、
+Graph 操作は infrastructure/agent/agent.py (AgentClient)。
+"""
+
 import json
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
@@ -5,35 +16,40 @@ from fastapi.responses import StreamingResponse
 
 from src.application.dependencies import (
     get_chat_use_case,
-    get_guide_use_case,
-    get_judge_use_case,
+    get_feedback_use_case,
+    get_analyze_use_case,
+    get_periodic_use_case,
     get_plan_generate_use_case,
-    get_session_store,
+    get_plan_query_use_case,
+    get_session_use_case,
 )
 from src.application.guide.chat_use_case import ChatUseCase
-from src.application.guide.judge_use_case import JudgeUseCase
+from src.application.guide.feedback_use_case import FeedbackUseCase
+from src.application.guide.periodic_use_case import PeriodicUseCase
+from src.application.guide.plan_query_use_case import PlanQueryUseCase
 from src.application.guide.plan_use_case import PlanGenerateUseCase
 from src.application.guide.schemas import (
-    ChatResponse,
     FeedbackRequest,
     FeedbackResponse,
     GuideResponse,
-    JudgeResponse,
     PlanGenerateRequest,
     PlanResponse,
-    PlanStepResponse,
     SessionStartResponse,
 )
-from src.application.guide.use_case import GuideUseCase
-from src.config import settings
-from src.infrastructure.repositories.plan_repository import get_plan_title, load_plan
-from src.infrastructure.session.store import ValkeySessionStore
+from src.application.guide.sse_schemas import SchemaExports
+from src.application.guide.session_use_case import SessionUseCase
+from src.application.guide.analyze_use_case import AnalyzeUseCase
 
 router = APIRouter()
 
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
-MAX_FILE_SIZE = 10 * 1024 * 1024  # 10MB
+MAX_FILE_SIZE = 10 * 1024 * 1024
 IMAGE_MAX_DIMENSION = 768
+
+
+# ============================================================================
+# 入力検証 (ルータの責務)
+# ============================================================================
 
 
 def _resize_image(image_bytes: bytes, max_dim: int = IMAGE_MAX_DIMENSION) -> bytes:
@@ -57,154 +73,91 @@ async def _validate_image(file: UploadFile) -> bytes:
     return _resize_image(image_bytes)
 
 
-async def _get_session(session_id: str, store: ValkeySessionStore):
-    """session_id からセッション取得。なければ 404。"""
-    session = await store.get(session_id)
-    if not session:
-        raise HTTPException(status_code=404, detail=f"セッション '{session_id[:8]}...' が見つかりません")
-    return session
+def _sse_stream(event_iter):
+    """(event_name, data) AsyncIterator → SSE 文字列 generator。"""
+    async def gen():
+        async for event, data in event_iter:
+            yield f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+    return gen()
 
 
-# === プラン取得/生成 (session 作成) ===
-
-
-def _steps_to_dicts(steps) -> list[dict]:
-    """PlanStep を session 保存用 dict に変換。"""
-    return [
-        {"step_number": s.step_number, "text": s.text,
-         "visual_marker": s.visual_marker, "frame_path": getattr(s, "frame_path", "")}
-        for s in steps
-    ]
+# ============================================================================
+# プラン
+# ============================================================================
 
 
 @router.post("/plan/generate", response_model=PlanResponse)
 async def generate_plan(
     request: PlanGenerateRequest,
-    use_case: PlanGenerateUseCase = Depends(get_plan_generate_use_case),
-    store: ValkeySessionStore = Depends(get_session_store),
+    generate_uc: PlanGenerateUseCase = Depends(get_plan_generate_use_case),
+    query_uc: PlanQueryUseCase = Depends(get_plan_query_use_case),
 ):
-    """ゴールからステップリスト自動生成 + セッション作成。"""
-    plan_response = await use_case.generate(goal=request.goal)
-
-    # セッション作成
-    from src.application.guide.plan_use_case import get_generated_steps
-    steps = get_generated_steps(plan_response.source_id) or []
-    session = await store.create(plan_response.source_id, _steps_to_dicts(steps))
-    plan_response.session_id = session.session_id
-
-    return plan_response
+    return await query_uc.generate_and_seed(goal=request.goal, generate_uc=generate_uc)
 
 
 @router.get("/plan/{source_id}", response_model=PlanResponse)
 async def get_plan(
     source_id: str,
-    store: ValkeySessionStore = Depends(get_session_store),
+    uc: PlanQueryUseCase = Depends(get_plan_query_use_case),
 ):
-    """プラン取得 + セッション作成。"""
-    from src.application.guide.plan_use_case import _plan_cache, get_generated_steps
-
-    for cached in _plan_cache.values():
-        if cached.source_id == source_id:
-            # generated プランのステップは _generated_steps_cache から取得
-            steps_raw = get_generated_steps(source_id) or load_plan(source_id, settings.static_dir) or []
-            session = await store.create(source_id, _steps_to_dicts(steps_raw))
-            cached.session_id = session.session_id
-            return cached
-
-    steps = load_plan(source_id, settings.static_dir)
-    if not steps:
-        raise HTTPException(status_code=404, detail=f"プラン '{source_id}' が見つかりません")
-    title = get_plan_title(source_id, settings.static_dir)
-
-    session = await store.create(source_id, _steps_to_dicts(steps))
-
-    return PlanResponse(
-        source_id=source_id,
-        title=title,
-        session_id=session.session_id,
-        steps=[
-            PlanStepResponse(
-                step_number=s.step_number, text=s.text,
-                visual_marker=s.visual_marker,
-                frame_url=f"/static/manual/{source_id}/{s.frame_path}" if s.frame_path else "",
-            )
-            for s in steps
-        ],
-    )
+    return await uc.get(source_id)
 
 
-# === 自律判定 (session_id + image) ===
+# ============================================================================
+# 自律判定 (/periodic)
+# ============================================================================
 
 
-@router.post("/judge", response_model=JudgeResponse)
-async def judge(
+@router.post("/periodic")
+async def periodic(
     file: UploadFile = File(...),
     session_id: str = Form(...),
     is_calibration: str = Form("false"),
-    use_case: JudgeUseCase = Depends(get_judge_use_case),
-    store: ValkeySessionStore = Depends(get_session_store),
+    stage1_result: str = Form(""),  # エッジ推論の持ち込み (Stage1Output JSON)
+    uc: PeriodicUseCase = Depends(get_periodic_use_case),
 ):
-    """自律監視: session_id + 画像のみ。コンテキストは BE セッションから取得。"""
     image_bytes = await _validate_image(file)
-    session = await _get_session(session_id, store)
-
-    # pending を Valkey から取得+削除 (アトミック、session 本体とは独立)
-    pending_msg, pending_blocks = await store.drain_pending(session_id)
-
-    result = await use_case.judge(
-        image_bytes=image_bytes,
-        session=session,
-        is_calibration=is_calibration.lower() == "true",
-        pending_message=pending_msg,
-        pending_blocks=pending_blocks,
+    return StreamingResponse(
+        _sse_stream(uc.astream(
+            session_id=session_id,
+            image_bytes=image_bytes,
+            is_calibration=is_calibration.lower() == "true",
+            stage1_result_json=stage1_result,
+        )),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
-    # セッション更新
-    session.add_observation(result.message)
-    session.record_call(escalated=result.escalated)
-    if result.judgment == "next":
-        session.advance_step()
-        result.current_step_index = session.current_step_index
-    await store.save(session)
 
-    return result
+# ============================================================================
+# ユーザー対話 (/chat) — ChatUseCase (ephemeral seed が絡むため)
+# ============================================================================
 
 
-# === ユーザー対話 (session_id + message) ===
-
-
-@router.post("/chat", response_model=ChatResponse)
+@router.post("/chat")
 async def chat(
     file: UploadFile | None = File(None),
     user_message: str = Form(...),
     session_id: str = Form(""),
-    use_case: ChatUseCase = Depends(get_chat_use_case),
-    store: ValkeySessionStore = Depends(get_session_store),
+    stage1_result: str = Form(""),
+    uc: ChatUseCase = Depends(get_chat_use_case),
 ):
-    """ユーザー対話: session_id + 発話のみ。"""
-    image_bytes = None
-    if file:
-        image_bytes = await _validate_image(file)
-
-    session = await _get_session(session_id, store) if session_id else None
-
-    result = await use_case.chat(
-        user_message=user_message,
-        image_bytes=image_bytes,
-        session=session,
+    image_bytes = await _validate_image(file) if file else None
+    return StreamingResponse(
+        _sse_stream(uc.astream(
+            session_id=session_id,
+            user_message=user_message,
+            image_bytes=image_bytes,
+            stage1_result_json=stage1_result,
+        )),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
-    # セッション更新 (chat_history, コスト)
-    if session:
-        session.add_chat_message("user", user_message)
-        session.add_chat_message("assistant", result["message"])
-        session.record_call(escalated=result["escalated"])
-        await store.save(session)
 
-    return ChatResponse(**result)
-
-
-# === 1ショット解析 (セッション不要) ===
+# ============================================================================
+# 1-shot 解析 (セッション不要)
+# ============================================================================
 
 
 @router.post("/analyze", response_model=GuideResponse)
@@ -212,10 +165,10 @@ async def analyze(
     file: UploadFile = File(...),
     trigger_word: str = Form(...),
     goal: str = Form(""),
-    use_case: GuideUseCase = Depends(get_guide_use_case),
+    uc: AnalyzeUseCase = Depends(get_analyze_use_case),
 ):
     image_bytes = await _validate_image(file)
-    return await use_case.analyze(image_bytes=image_bytes, trigger_word=trigger_word, goal=goal)
+    return await uc.analyze(image_bytes=image_bytes, trigger_word=trigger_word, goal=goal)
 
 
 @router.post("/analyze/stream")
@@ -223,10 +176,12 @@ async def analyze_stream(
     file: UploadFile = File(...),
     trigger_word: str = Form(...),
     goal: str = Form(""),
-    use_case: GuideUseCase = Depends(get_guide_use_case),
+    uc: AnalyzeUseCase = Depends(get_analyze_use_case),
 ):
     image_bytes = await _validate_image(file)
-    meta, chunks = await use_case.analyze_stream(image_bytes=image_bytes, trigger_word=trigger_word, goal=goal)
+    meta, chunks = await uc.analyze_stream(
+        image_bytes=image_bytes, trigger_word=trigger_word, goal=goal,
+    )
 
     async def event_generator():
         if meta:
@@ -235,37 +190,42 @@ async def analyze_stream(
             yield f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
         yield "data: [DONE]\n\n"
 
-    return StreamingResponse(event_generator(), media_type="text/event-stream",
-                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    return StreamingResponse(
+        event_generator(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 
-# === フィードバック ===
-
-
-# === 探索モード (セッション開始のみ、プランなし) ===
+# ============================================================================
+# 探索モード: セッション開始のみ
+# ============================================================================
 
 
 @router.post("/session/start", response_model=SessionStartResponse)
-async def start_session(
-    store: ValkeySessionStore = Depends(get_session_store),
-):
-    """探索モード用セッション作成。プランなし。"""
-    session = await store.create(plan_source_id="explore", plan_steps=[])
-    return SessionStartResponse(session_id=session.session_id)
+async def start_session(uc: SessionUseCase = Depends(get_session_use_case)):
+    session_id = await uc.start_explore()
+    return SessionStartResponse(session_id=session_id)
 
 
-# === フィードバック ===
+# ============================================================================
+# フィードバック
+# ============================================================================
 
 
 @router.post("/feedback", response_model=FeedbackResponse)
-async def post_feedback(request: FeedbackRequest):
-    from src.domain.guide.model import FailedPlan, Feedback
-    from src.infrastructure.repositories.feedback_repository import SqliteFeedbackRepository
-    repo = SqliteFeedbackRepository()
-    fb = Feedback(**request.model_dump())
-    fid = repo.save(fb)
-    if request.sentiment == "plan_retry":
-        fp = FailedPlan(plan_source_id=request.target_id, task_description=request.target_content,
-                        abandoned_at_step=request.step_index or 0, reason=request.raw_content)
-        repo.save_failed_plan(fp)
-    return FeedbackResponse(feedback_id=fid)
+async def post_feedback(
+    request: FeedbackRequest,
+    uc: FeedbackUseCase = Depends(get_feedback_use_case),
+):
+    return uc.submit(request)
+
+
+# ============================================================================
+# スキーマ公開 (OpenAPI 用): SSE / form-data の中身の型をクライアントに配る
+# ============================================================================
+
+
+@router.get("/schemas", response_model=SchemaExports, include_in_schema=True)
+async def _schemas() -> SchemaExports:
+    """クライアント型生成専用 (openapi-typescript で拾う)。実呼び出し不要。"""
+    raise NotImplementedError

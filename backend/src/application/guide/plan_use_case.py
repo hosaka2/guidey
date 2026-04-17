@@ -1,6 +1,7 @@
 import hashlib
 import logging
 
+from src.application.guide import plan_cache
 from src.common.json_utils import extract_json_array
 from src.domain.guide.model import PlanStep, RAG_COLLECTIONS, RagResult
 from src.domain.guide.service import GuideService
@@ -11,14 +12,6 @@ from src.infrastructure.rag.milvus import MilvusRAGClient
 from .schemas import PlanResponse, PlanStepResponse
 
 logger = logging.getLogger(__name__)
-
-# メモリキャッシュ (サーバー再起動でクリア)
-_plan_cache: dict[str, PlanResponse] = {}
-_generated_steps_cache: dict[str, list[PlanStep]] = {}
-
-
-def get_generated_steps(source_id: str) -> list[PlanStep] | None:
-    return _generated_steps_cache.get(source_id)
 
 
 class PlanGenerateUseCase:
@@ -35,10 +28,10 @@ class PlanGenerateUseCase:
         self._embedding_client = embedding_client
 
     async def generate(self, goal: str) -> PlanResponse:
-        cache_key = goal.strip().lower()
-        if cache_key in _plan_cache:
-            logger.info("Plan cache hit: %s", cache_key[:30])
-            return _plan_cache[cache_key]
+        cached = plan_cache.get_by_goal(goal)
+        if cached:
+            logger.info("Plan cache hit: %s", goal[:30])
+            return cached
 
         # Multi-Document Synthesis: 全コレクション横断検索
         rag_results = await self._search_rag(goal, top_k=15)
@@ -75,8 +68,7 @@ class PlanGenerateUseCase:
             ],
         )
 
-        _plan_cache[cache_key] = response
-        _generated_steps_cache[source_id] = steps
+        plan_cache.put(goal, response, steps)
         return response
 
     async def _build_multi_source_context(self, rag_results: list[RagResult]) -> str:

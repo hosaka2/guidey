@@ -44,9 +44,9 @@ class Settings(BaseSettings):
     # LangSmith (env: LANGCHAIN_TRACING_V2, LANGCHAIN_API_KEY, LANGCHAIN_PROJECT)
     # LangChain が自動検出するので config に持つ必要なし。.env に書くだけ。
 
-    # Valkey / Redis
+    # Redis 8+ (langgraph-checkpoint-redis が RedisJSON/RediSearch を要求)
     redis_url: str = "redis://localhost:6379/0"
-    session_ttl_sec: int = 1800  # 30分
+    session_ttl_min: int = 30  # Checkpointer TTL (分単位)
 
     # --- Harness ---
     # パイプラインタイムアウト (秒)

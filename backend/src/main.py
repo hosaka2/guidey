@@ -9,7 +9,7 @@ from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
-from .common.exceptions import DomainException, ValidationError
+from .common.exceptions import DomainException
 from .config import settings
 from .routes import api_router
 
@@ -42,23 +42,18 @@ async def lifespan(app: FastAPI):
     except Exception:
         logger.warning("Failed to init personalization DB", exc_info=True)
 
-    # Valkey 接続確認
-    from .application.dependencies import get_session_store
+    # Checkpointer (AsyncRedisSaver) 初期化 + インデックス作成
+    from .application.dependencies import get_checkpointer
     try:
-        store = get_session_store()
-        client = await store._get_client()
-        await client.ping()
-        logger.info("Valkey connected (%s)", settings.redis_url)
+        await get_checkpointer()
+        logger.info("Redis checkpointer ready (%s)", settings.redis_url)
     except Exception:
-        logger.warning("Valkey connection failed — sessions will not work", exc_info=True)
+        logger.warning(
+            "Checkpointer init failed — sessions will not persist", exc_info=True,
+        )
 
     yield
 
-    # Valkey クリーンアップ
-    try:
-        await get_session_store().close()
-    except Exception:
-        pass
     logger.info("Shutting down Guidey API...")
 
 
@@ -77,14 +72,10 @@ app.add_middleware(
 )
 
 
-@app.exception_handler(ValidationError)
-async def validation_error_handler(request: Request, exc: ValidationError):
-    return JSONResponse(status_code=400, content={"detail": exc.message})
-
-
 @app.exception_handler(DomainException)
 async def domain_exception_handler(request: Request, exc: DomainException):
-    return JSONResponse(status_code=500, content={"detail": exc.message})
+    # http_status は各例外クラスで定義 (ValidationError=400, LLMError=502, ...)
+    return JSONResponse(status_code=exc.http_status, content={"detail": exc.message})
 
 
 @app.exception_handler(Exception)

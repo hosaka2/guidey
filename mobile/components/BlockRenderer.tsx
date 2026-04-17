@@ -1,5 +1,5 @@
 import { View } from "@tamagui/core";
-import type { Block } from "@/types/blocks";
+import type { Block } from "@/lib/types";
 import { TextBlockView } from "./blocks/TextBlockView";
 import { ImageBlockView } from "./blocks/ImageBlockView";
 import { VideoBlockView } from "./blocks/VideoBlockView";

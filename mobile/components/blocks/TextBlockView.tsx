@@ -1,5 +1,5 @@
 import { View, Text } from "@tamagui/core";
-import type { TextBlock } from "@/types/blocks";
+import type { TextBlock } from "@/lib/types";
 
 const BG = {
   normal: "#F0F0F0",

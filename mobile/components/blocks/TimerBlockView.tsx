@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { View, Text } from "@tamagui/core";
 import { Feather } from "@expo/vector-icons";
-import type { TimerBlock } from "@/types/blocks";
+import type { TimerBlock } from "@/lib/types";
 
 export function TimerBlockView({ block }: { block: TimerBlock }) {
   const [remaining, setRemaining] = useState(block.duration_sec);

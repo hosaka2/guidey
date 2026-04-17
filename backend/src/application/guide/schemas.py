@@ -38,22 +38,7 @@ class PlanResponse(BaseModel):
     steps: list[PlanStepResponse]
 
 
-class JudgeResponse(BaseModel):
-    judgment: str  # "continue" | "next" | "anomaly"
-    confidence: float
-    message: str
-    current_step_index: int
-    blocks: list[dict] = []  # UIブロック (Block型のdictリスト)
-    escalated: bool = False  # 2段目 (Claude/HQ) で処理されたか
-
-
 # --- Step 3b: プラン自動生成 ---
-
-
-class ChatResponse(BaseModel):
-    message: str
-    blocks: list[dict] = []
-    escalated: bool = False
 
 
 class PlanGenerateRequest(BaseModel):

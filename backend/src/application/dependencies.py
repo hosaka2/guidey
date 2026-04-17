@@ -1,14 +1,29 @@
+"""FastAPI DI コンテナ.
+
+層構造:
+  - Infrastructure: Checkpointer, LLM クライアント, Graph, AgentClient
+  - Application (UseCase): 業務ロジック / オーケストレーション。統一感のため pass-through でも必ず経由
+  - Routes: 入力検証 + UseCase 呼び出し + SSE ラップのみ
+"""
+
 import logging
 from pathlib import Path
 
 from fastapi import Depends
+from langgraph.checkpoint.redis.aio import AsyncRedisSaver
+from langgraph.graph.state import CompiledStateGraph
 
 from src.application.guide.chat_use_case import ChatUseCase
-from src.application.guide.judge_use_case import JudgeUseCase
+from src.application.guide.feedback_use_case import FeedbackUseCase
+from src.application.guide.periodic_use_case import PeriodicUseCase
+from src.application.guide.plan_query_use_case import PlanQueryUseCase
 from src.application.guide.plan_use_case import PlanGenerateUseCase
-from src.application.guide.use_case import GuideUseCase
+from src.application.guide.session_use_case import SessionUseCase
+from src.application.guide.analyze_use_case import AnalyzeUseCase
 from src.config import settings
 from src.domain.guide.service import GuideService
+from src.infrastructure.agent.agent import AgentClient
+from src.infrastructure.agent.graph import build_guide_graph
 from src.infrastructure.llm.base import LLMClient
 from src.infrastructure.llm.factory import get_hq_llm_client, get_llm_client
 from src.infrastructure.rag.bm25 import BM25Index
@@ -16,23 +31,38 @@ from src.infrastructure.rag.embeddings import EmbeddingClient
 from src.infrastructure.rag.hybrid import HybridSearchClient
 from src.infrastructure.rag.milvus import MilvusRAGClient
 
-from src.infrastructure.session.store import ValkeySessionStore
-
 logger = logging.getLogger(__name__)
 
-# シングルトン
+# === シングルトン ===
 _rag_client: MilvusRAGClient | None = None
 _embedding_client: EmbeddingClient | None = None
 _hybrid_client: HybridSearchClient | None = None
 _bm25_index: BM25Index | None = None
-_session_store: ValkeySessionStore | None = None
+_checkpointer: AsyncRedisSaver | None = None
+_guide_graph: CompiledStateGraph | None = None
+_agent_client: AgentClient | None = None
 
 
-def get_session_store() -> ValkeySessionStore:
-    global _session_store
-    if _session_store is None:
-        _session_store = ValkeySessionStore()
-    return _session_store
+# === Infrastructure layer ===
+
+
+async def get_checkpointer() -> AsyncRedisSaver:
+    """AsyncRedisSaver のシングルトン。初回に asetup() でインデックス作成。"""
+    global _checkpointer
+    if _checkpointer is None:
+        _checkpointer = AsyncRedisSaver(
+            redis_url=settings.redis_url,
+            ttl={
+                "default_ttl": settings.session_ttl_min,
+                "refresh_on_read": True,
+            },
+        )
+        await _checkpointer.asetup()
+        logger.info(
+            "Checkpointer ready (%s, ttl=%dmin)",
+            settings.redis_url, settings.session_ttl_min,
+        )
+    return _checkpointer
 
 
 def get_guide_service() -> GuideService:
@@ -72,19 +102,85 @@ def get_hybrid_client(
     if not rag_client:
         return None
     _bm25_index = BM25Index()
-    # BM25インデックスは初回は空、データ登録時に構築される
     _hybrid_client = HybridSearchClient(rag_client, _bm25_index)
     return _hybrid_client
 
 
-def get_guide_use_case(
+async def get_guide_graph(
+    guide_service: GuideService = Depends(get_guide_service),
+    llm_client: LLMClient = Depends(get_llm_client),
+    hq_client: LLMClient = Depends(get_hq_llm_client),
+    rag_client: MilvusRAGClient | None = Depends(get_rag_client),
+    embedding_client: EmbeddingClient | None = Depends(get_embedding_client),
+) -> CompiledStateGraph:
+    """GuideGraph のシングルトン (checkpointer 付き)。"""
+    global _guide_graph
+    if _guide_graph is None:
+        checkpointer = await get_checkpointer()
+        _guide_graph = build_guide_graph(
+            guide_service=guide_service,
+            llm_client=llm_client,
+            hq_client=hq_client,
+            rag_client=rag_client,
+            embedding_client=embedding_client,
+            checkpointer=checkpointer,
+        )
+        logger.info("GuideGraph compiled with checkpointer")
+    return _guide_graph
+
+
+async def get_agent_client(
+    graph: CompiledStateGraph = Depends(get_guide_graph),
+) -> AgentClient:
+    """AgentClient のシングルトン (graph 操作の唯一の入口)。"""
+    global _agent_client
+    if _agent_client is None:
+        _agent_client = AgentClient(graph=graph)
+    return _agent_client
+
+
+# === Application layer (UseCase) ===
+
+
+async def get_periodic_use_case(
+    agent: AgentClient = Depends(get_agent_client),
+) -> PeriodicUseCase:
+    return PeriodicUseCase(agent=agent)
+
+
+async def get_chat_use_case(
+    agent: AgentClient = Depends(get_agent_client),
+) -> ChatUseCase:
+    return ChatUseCase(agent=agent)
+
+
+async def get_session_use_case(
+    agent: AgentClient = Depends(get_agent_client),
+) -> SessionUseCase:
+    return SessionUseCase(agent=agent)
+
+
+async def get_plan_query_use_case(
+    agent: AgentClient = Depends(get_agent_client),
+) -> PlanQueryUseCase:
+    return PlanQueryUseCase(agent=agent)
+
+
+def get_feedback_use_case() -> FeedbackUseCase:
+    return FeedbackUseCase()
+
+
+# === 1-shot 系 (Graph 非依存) ===
+
+
+def get_analyze_use_case(
     guide_service: GuideService = Depends(get_guide_service),
     llm_client: LLMClient = Depends(get_llm_client),
     rag_client: MilvusRAGClient | None = Depends(get_rag_client),
     embedding_client: EmbeddingClient | None = Depends(get_embedding_client),
     hybrid_client: HybridSearchClient | None = Depends(get_hybrid_client),
-) -> GuideUseCase:
-    return GuideUseCase(
+) -> AnalyzeUseCase:
+    return AnalyzeUseCase(
         guide_service=guide_service,
         llm_client=llm_client,
         rag_client=rag_client,
@@ -93,45 +189,9 @@ def get_guide_use_case(
     )
 
 
-def get_judge_use_case(
-    guide_service: GuideService = Depends(get_guide_service),
-    llm_client: LLMClient = Depends(get_llm_client),
-    embedding_client: EmbeddingClient | None = Depends(get_embedding_client),
-    hq_client: LLMClient = Depends(get_hq_llm_client),
-    rag_client: MilvusRAGClient | None = Depends(get_rag_client),
-    session_store: ValkeySessionStore = Depends(get_session_store),
-) -> JudgeUseCase:
-    return JudgeUseCase(
-        guide_service=guide_service,
-        llm_client=llm_client,
-        embedding_client=embedding_client,
-        hq_client=hq_client,
-        rag_client=rag_client,
-        session_store=session_store,
-    )
-
-
-def get_chat_use_case(
-    guide_service: GuideService = Depends(get_guide_service),
-    llm_client: LLMClient = Depends(get_llm_client),
-    hq_client: LLMClient = Depends(get_hq_llm_client),
-    rag_client: MilvusRAGClient | None = Depends(get_rag_client),
-    embedding_client: EmbeddingClient | None = Depends(get_embedding_client),
-    session_store: ValkeySessionStore = Depends(get_session_store),
-) -> ChatUseCase:
-    return ChatUseCase(
-        guide_service=guide_service,
-        llm_client=llm_client,
-        hq_client=hq_client,
-        rag_client=rag_client,
-        embedding_client=embedding_client,
-        session_store=session_store,
-    )
-
-
 def get_plan_generate_use_case(
     guide_service: GuideService = Depends(get_guide_service),
-    llm_client: LLMClient = Depends(get_hq_llm_client),  # 高品質版
+    llm_client: LLMClient = Depends(get_hq_llm_client),
     rag_client: MilvusRAGClient | None = Depends(get_rag_client),
     embedding_client: EmbeddingClient | None = Depends(get_embedding_client),
 ) -> PlanGenerateUseCase:

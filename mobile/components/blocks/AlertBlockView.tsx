@@ -1,6 +1,6 @@
 import { View, Text } from "@tamagui/core";
 import { Feather } from "@expo/vector-icons";
-import type { AlertBlock } from "@/types/blocks";
+import type { AlertBlock } from "@/lib/types";
 
 const CFG = {
   info: { bg: "#E3F2FD", color: "#1565C0", icon: "info" as const },

@@ -14,8 +14,8 @@ import { View, Text } from "@tamagui/core";
 import { useRouter } from "expo-router";
 import { Feather } from "@expo/vector-icons";
 import { useApiContext } from "@/contexts/ApiContext";
-import { generatePlan } from "@/hooks/useJudgeApi";
-import type { Plan } from "@/types/plan";
+import { generatePlan } from "@/lib/api";
+import type { Plan } from "@/lib/types";
 
 const ACCENT = "#FF6B35";
 

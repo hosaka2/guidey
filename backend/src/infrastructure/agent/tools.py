@@ -1,8 +1,10 @@
 """LangChain Tool 定義.
 
-共通ツール (コンテキスト不要): timer, alert, text
-コンテキストアウェアツール (セッション依存): step_image, step_video
-HQ追加ツール: search_rag, modify_step
+ブロック生成系ツールは `response_format="content_and_artifact"` を使い、
+LLM には人間可読な content、後続処理には artifact (dict) を渡す。
+
+  Stage 1: (ツール未使用、Structured Output のみ)
+  Stage 2: BASIC_TOOLS + context tools + RAG/プラン操作 を create_react_agent で実行
 """
 
 from langchain_core.tools import tool
@@ -13,22 +15,25 @@ from src.application.guide.blocks import AlertBlock, ImageBlock, TextBlock, Time
 # === 共通ツール (コンテキスト不要) ===
 
 
-@tool
-def set_timer(duration_sec: int, label: str) -> dict:
+@tool(response_format="content_and_artifact")
+def set_timer(duration_sec: int, label: str) -> tuple[str, dict]:
     """タイマーをセットする。煮込み時間や待ち時間に使う。"""
-    return TimerBlock(duration_sec=duration_sec, label=label).model_dump()
+    block = TimerBlock(duration_sec=duration_sec, label=label).model_dump()
+    return f"{label} のタイマーを {duration_sec} 秒でセットしました", block
 
 
-@tool
-def send_alert(message: str, severity: str = "info") -> dict:
+@tool(response_format="content_and_artifact")
+def send_alert(message: str, severity: str = "info") -> tuple[str, dict]:
     """ユーザーに警告や通知を表示する。severity: info, warning, danger"""
-    return AlertBlock(message=message, severity=severity).model_dump()  # type: ignore[arg-type]
+    block = AlertBlock(message=message, severity=severity).model_dump()  # type: ignore[arg-type]
+    return f"[{severity}] {message}", block
 
 
-@tool
-def show_text(content: str, style: str = "normal") -> dict:
+@tool(response_format="content_and_artifact")
+def show_text(content: str, style: str = "normal") -> tuple[str, dict]:
     """テキストを表示する。style: normal, emphasis, warning"""
-    return TextBlock(content=content, style=style).model_dump()  # type: ignore[arg-type]
+    block = TextBlock(content=content, style=style).model_dump()  # type: ignore[arg-type]
+    return content, block
 
 
 BASIC_TOOLS = [set_timer, send_alert, show_text]
@@ -54,35 +59,34 @@ def build_context_tools(
         return None
 
     def _resolve_video_url() -> str | None:
-        """プランのソース動画 URL (YouTube)."""
         if not plan_source_id:
             return None
-        # source_id が YouTube video_id の場合
         if len(plan_source_id) == 11 or plan_source_id.startswith("generated-"):
-            # generated プランは動画なし
             if plan_source_id.startswith("generated-"):
                 return None
             return f"https://www.youtube.com/watch?v={plan_source_id}"
         return None
 
-    @tool
-    def show_step_image(step_number: int = 0, caption: str = "") -> dict:
+    @tool(response_format="content_and_artifact")
+    def show_step_image(step_number: int = 0, caption: str = "") -> tuple[str, dict]:
         """指定ステップの参考画像を表示する。step_number=0 で現在のステップ。"""
-        if step_number == 0 and plan_steps_ref:
-            # 現在のステップは呼び出し元で解決
-            step_number = 1
-        url = _resolve_frame_url(step_number)
+        sn = step_number if step_number > 0 else 1
+        url = _resolve_frame_url(sn)
         if not url:
-            return TextBlock(content=f"ステップ{step_number}の参考画像が見つかりません", style="normal").model_dump()
-        return ImageBlock(url=url, caption=caption or f"ステップ{step_number}の参考画像").model_dump()
+            block = TextBlock(content=f"ステップ{sn}の参考画像が見つかりません").model_dump()
+            return block["content"], block
+        block = ImageBlock(url=url, caption=caption or f"ステップ{sn}の参考画像").model_dump()
+        return f"ステップ{sn}の参考画像を表示", block
 
-    @tool
-    def show_video() -> dict:
+    @tool(response_format="content_and_artifact")
+    def show_video() -> tuple[str, dict]:
         """このプランの参考動画を表示する。"""
         url = _resolve_video_url()
         if not url:
-            return TextBlock(content="参考動画が見つかりません", style="normal").model_dump()
-        return VideoBlock(url=url).model_dump()
+            block = TextBlock(content="参考動画が見つかりません").model_dump()
+            return block["content"], block
+        block = VideoBlock(url=url).model_dump()
+        return "参考動画を表示", block
 
     return [show_step_image, show_video]
 
@@ -107,22 +111,23 @@ def build_hq_tools(
     """HQ用ツール = 共通 + コンテキスト + RAG + プラン操作."""
 
     @tool
-    def search_rag(query: str, top_k: int = 3) -> str:
+    async def search_rag(query: str, top_k: int = 3) -> str:
         """RAGデータベースから関連情報を検索する。レシピや手順の参考情報が必要な時に使う。"""
         if not rag_client or not embedding_client:
             return "RAGが利用できません"
-        import asyncio
         try:
-            loop = asyncio.get_event_loop()
-            embedding = loop.run_until_complete(embedding_client.embed_query(query))
+            embedding = await embedding_client.embed_query(query)
             results = []
             for collection in ["diy", "cooking"]:
-                hits = rag_client.search(collection=collection, query_embedding=embedding, top_k=top_k)
+                hits = rag_client.search(
+                    collection=collection, query_embedding=embedding, top_k=top_k,
+                )
                 results.extend(hits)
             if not results:
                 return "関連する手順が見つかりませんでした"
             return "\n".join(
-                f"- Step {r.step_number}: {r.text}" + (f" [完了基準: {r.visual_marker}]" if r.visual_marker else "")
+                f"- Step {r.step_number}: {r.text}"
+                + (f" [完了基準: {r.visual_marker}]" if r.visual_marker else "")
                 for r in results[:top_k]
             )
         except Exception as e:
