@@ -14,21 +14,23 @@ T = TypeVar("T", bound=BaseModel)
 class LLMClient(Protocol):
     async def analyze_image(self, image_bytes: bytes, system_prompt: str) -> str: ...
 
-    async def analyze_image_stream(
-        self, image_bytes: bytes, system_prompt: str
-    ) -> AsyncIterator[str]: ...
+    async def analyze_image_stream(self, image_bytes: bytes, system_prompt: str) -> AsyncIterator[str]: ...
 
     async def generate_text(self, system_prompt: str) -> str: ...
 
     async def call_structured(
-        self, system_prompt: str, schema: type[T],
+        self,
+        system_prompt: str,
+        schema: type[T],
         image_bytes: bytes | None = None,
     ) -> T:
         """Structured Output で呼び出し。Pydantic インスタンスを返す。"""
         ...
 
     async def call_react_agent(
-        self, system_prompt: str, tools: list[BaseTool],
+        self,
+        system_prompt: str,
+        tools: list[BaseTool],
         response_schema: type[T],
         image_bytes: bytes | None = None,
     ) -> tuple[T, list[dict]]:
@@ -73,9 +75,7 @@ class BaseLangChainClient:
         response = await self._model.ainvoke([message])
         return str(response.content)
 
-    async def analyze_image_stream(
-        self, image_bytes: bytes, system_prompt: str
-    ) -> AsyncIterator[str]:
+    async def analyze_image_stream(self, image_bytes: bytes, system_prompt: str) -> AsyncIterator[str]:
         message = self._build_message(image_bytes, system_prompt)
         async for chunk in self._model.astream([message]):
             if chunk.content:
@@ -88,7 +88,9 @@ class BaseLangChainClient:
         return str(response.content)
 
     async def call_structured(
-        self, system_prompt: str, schema: type[T],
+        self,
+        system_prompt: str,
+        schema: type[T],
         image_bytes: bytes | None = None,
     ) -> T:
         structured = self._model.with_structured_output(schema)
@@ -97,7 +99,9 @@ class BaseLangChainClient:
         return result  # type: ignore[return-value]
 
     async def call_react_agent(
-        self, system_prompt: str, tools: list[BaseTool],
+        self,
+        system_prompt: str,
+        tools: list[BaseTool],
         response_schema: type[T],
         image_bytes: bytes | None = None,
     ) -> tuple[T, list[dict]]:

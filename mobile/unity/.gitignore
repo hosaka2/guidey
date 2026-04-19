@@ -1,0 +1,50 @@
+# Unity Editor プロジェクト本体は git 管理しない (個人の Unity 環境に依存)。
+# 必要な資産は Assets/Scripts/ のみ (CameraBridge.cs, UnityInterop.cs)。
+# セットアップ手順は README.md 参照。
+/guidey-unity/
+
+# Unity Build 出力 (60MB+ の .so / .aar を含む。ビルド成果物は git 管理外)。
+# RN 側ビルド時は Unity Editor で Build → 本ディレクトリに export してから
+# `npx expo run:android` する。
+/builds/
+
+# ---- 以下、Unity 標準の ignore (参考) ----
+/[Ll]ibrary/
+/[Tt]emp/
+/[Oo]bj/
+/[Bb]uild/
+/[Bb]uilds/
+/[Ll]ogs/
+/[Uu]ser[Ss]ettings/
+/[Mm]emoryCaptures/
+/[Rr]ecordings/
+
+ExportedObj/
+.consulo/
+*.csproj
+*.unityproj
+*.sln
+*.suo
+*.tmp
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+*.pidb.meta
+*.pdb.meta
+*.mdb.meta
+
+sysinfo.txt
+
+*.apk
+*.aab
+*.unitypackage
+*.app
+
+crashlytics-build.properties

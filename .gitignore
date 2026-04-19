@@ -40,3 +40,7 @@ backend/static/videos/
 
 # Logs
 *.log
+
+# Claude Code local settings (個人設定は除外、skills は共有資産として commit する)
+.claude/settings.local.json
+.claude/launch.json

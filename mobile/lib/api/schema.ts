@@ -248,10 +248,7 @@ export interface components {
             file?: string | null;
             /** User Message */
             user_message: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
             /**
              * Stage1 Result
@@ -337,6 +334,8 @@ export interface components {
         PlanGenerateRequest: {
             /** Goal */
             goal: string;
+            /** Session Id */
+            session_id: string;
         };
         /** PlanResponse */
         PlanResponse: {
@@ -344,10 +343,7 @@ export interface components {
             source_id: string;
             /** Title */
             title: string;
-            /**
-             * Session Id
-             * @default
-             */
+            /** Session Id */
             session_id: string;
             /** Steps */
             steps: components["schemas"]["PlanStepResponse"][];
@@ -514,7 +510,9 @@ export interface operations {
     };
     get_plan_guide_plan__source_id__get: {
         parameters: {
-            query?: never;
+            query: {
+                session_id: string;
+            };
             header?: never;
             path: {
                 source_id: string;

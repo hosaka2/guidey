@@ -1,0 +1,14 @@
+{
+  "name": "expo-unity-view",
+  "version": "0.1.0",
+  "description": "Local Expo Module: Unity as a Library (based on shogo0x2e/uaal-for-expo-example)",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "private": true,
+  "dependencies": {},
+  "peerDependencies": {
+    "expo": "*",
+    "react": "*",
+    "react-native": "*"
+  }
+}

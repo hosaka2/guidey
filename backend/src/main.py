@@ -32,11 +32,13 @@ logger = logging.getLogger(__name__)
 async def lifespan(app: FastAPI):
     # === OpenTelemetry 初期化 ===
     from .common.telemetry import init_telemetry
+
     init_telemetry(enable_console=settings.debug)
 
     logger.info("Starting Guidey API...")
     # パーソナライズDB初期化
     from .infrastructure.repositories.feedback_repository import init_db
+
     try:
         init_db()
     except Exception:
@@ -44,12 +46,14 @@ async def lifespan(app: FastAPI):
 
     # Checkpointer (AsyncRedisSaver) 初期化 + インデックス作成
     from .application.dependencies import get_checkpointer
+
     try:
         await get_checkpointer()
         logger.info("Redis checkpointer ready (%s)", settings.redis_url)
     except Exception:
         logger.warning(
-            "Checkpointer init failed — sessions will not persist", exc_info=True,
+            "Checkpointer init failed — sessions will not persist",
+            exc_info=True,
         )
 
     yield
@@ -90,6 +94,7 @@ async def global_exception_handler(request: Request, exc: Exception):
 
 
 from pathlib import Path
+
 from fastapi.staticfiles import StaticFiles
 
 static_path = Path(settings.static_dir)
@@ -108,4 +113,5 @@ async def root():
 async def metrics():
     """パイプラインメトリクス (インメモリ、dev/LT用)."""
     from .common.metrics import pipeline_metrics
+
     return pipeline_metrics.summary()

@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   SafeAreaView,
   StatusBar,
@@ -14,7 +14,7 @@ import { View, Text } from "@tamagui/core";
 import { useRouter } from "expo-router";
 import { Feather } from "@expo/vector-icons";
 import { useApiContext } from "@/contexts/ApiContext";
-import { generatePlan } from "@/lib/api";
+import { generatePlan, startSession } from "@/lib/api";
 import type { Plan } from "@/lib/types";
 
 const ACCENT = "#FF6B35";
@@ -26,14 +26,23 @@ export default function GoalScreen() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [generatedPlan, setGeneratedPlan] = useState<Plan | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(null);
+
+  // プランモード開始時点で session を採番 (explore と同じ方針)
+  useEffect(() => {
+    if (sessionId) return;
+    startSession(apiUrl)
+      .then((r) => setSessionId(r.session_id))
+      .catch((e) => console.warn("[GoalScreen] session start failed:", e));
+  }, [apiUrl, sessionId]);
 
   const handleGenerate = async () => {
-    if (!goal.trim()) return;
+    if (!goal.trim() || !sessionId) return;
     setIsGenerating(true);
     setError(null);
     setGeneratedPlan(null);
     try {
-      const plan = await generatePlan(apiUrl, goal.trim());
+      const plan = await generatePlan(apiUrl, goal.trim(), sessionId);
       setGeneratedPlan(plan);
     } catch (err) {
       console.warn("[GoalScreen] Plan generation failed:", err);
@@ -44,9 +53,9 @@ export default function GoalScreen() {
   };
 
   const handleStartWithPlan = () => {
-    if (!generatedPlan) return;
+    if (!generatedPlan || !sessionId) return;
     router.push(
-      `/guide?goal=${encodeURIComponent(goal.trim())}&planId=${generatedPlan.source_id}`
+      `/guide?goal=${encodeURIComponent(goal.trim())}&planId=${generatedPlan.source_id}&sessionId=${sessionId}`
     );
   };
 
@@ -173,11 +182,11 @@ export default function GoalScreen() {
               <View paddingHorizontal="$2">
                 <Pressable
                   onPress={handleGenerate}
-                  disabled={!goal.trim() || isGenerating}
+                  disabled={!goal.trim() || isGenerating || !sessionId}
                   style={({ pressed }) => [
                     styles.startButton,
                     { backgroundColor: ACCENT },
-                    (!goal.trim() || isGenerating) && styles.startDisabled,
+                    (!goal.trim() || isGenerating || !sessionId) && styles.startDisabled,
                     pressed && styles.startPressed,
                   ]}
                 >

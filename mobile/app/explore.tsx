@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { StyleSheet } from "react-native";
 import { useRouter } from "expo-router";
 import * as Speech from "expo-speech";
-import * as ScreenOrientation from "expo-screen-orientation";
 
 import { BottomBar } from "@/components/BottomBar";
 import { CameraViewHandle } from "@/components/CameraView";
@@ -12,7 +11,7 @@ import { useApiContext } from "@/contexts/ApiContext";
 import { ChatInput, useChat } from "@/features/chat";
 import { useSpeechRecognition, useVoiceIntents } from "@/features/voice";
 import { startSession } from "@/lib/api";
-import { useAgentState, useBlockRouter } from "@/lib/hooks";
+import { useAgentState, useBlockRouter, useOrientationLock } from "@/lib/hooks";
 import type { Block } from "@/lib/types";
 
 /**
@@ -20,6 +19,7 @@ import type { Block } from "@/lib/types";
  * 役割の薄い orchestrator: session 取得 → features を composition。
  */
 export default function ExploreScreen() {
+  useOrientationLock();
   const router = useRouter();
   const cameraRef = useRef<CameraViewHandle>(null);
   const { apiUrl } = useApiContext();
@@ -30,13 +30,7 @@ export default function ExploreScreen() {
   const [inputValue, setInputValue] = useState("");
   const [voiceEnabled, setVoiceEnabled] = useState(true);
 
-  // --- 横向きロック (画面離脱時に戻す) ---
-  useEffect(() => {
-    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
-    return () => {
-      ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
-    };
-  }, []);
+  // 画面の orientation は app/_layout.tsx の Stack.Screen options で宣言 (landscape)
 
   // --- セッション (BE で seed) ---
   useEffect(() => {
@@ -96,10 +90,7 @@ export default function ExploreScreen() {
         mediaBlocks={mediaBlocks}
         bottomBar={
           <BottomBar
-            onBack={() => {
-              ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
-              setTimeout(() => router.back(), 200);
-            }}
+            onBack={() => router.back()}
             onTextInput={() => setShowInput(true)}
             voiceEnabled={voiceEnabled}
             onToggleVoice={() => setVoiceEnabled((v) => !v)}

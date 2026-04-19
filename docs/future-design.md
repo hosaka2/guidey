@@ -304,8 +304,9 @@ Phase 2: VLM 対応
    - バッテリー最適化 (アダプティブ間隔)
    - オフラインモード (BE 接続なしでも基本判定可能)
 
-Apple MLX モード (iOSネイティブ VLM)で純正VLMが動くと思う。これも使いたい。
-cloud, エッジ（gemmaなどの自前ホスト）, エッジ（apple純正）。この3パターンを切り替えれるように
+エッジ経路は **cloud / gemma-local (llama.rn + Gemma 4 E2B VLM)** の 2 パターンで Settings から切替。
+Apple FoundationModels は画像入力をサポートしないため VLM 用途では採用しない
+(Vision framework + LM の二段構成は本来の VLM として成立しないため)。
 
 ---
 
@@ -375,6 +376,110 @@ embedding 関数を差し替えるだけで移行可能。
 
 ### ステーションモード
 - USBカメラ (三脚固定) + Mac + iPad + WebSocket配信
+
+---
+
+<a id="xreal-unity-adapter"></a>
+## 7.5 XREAL (Beam Pro + 1S + Eye) — Unity アダプタ経路
+
+**背景**: XREAL は公式の Android Native SDK を持たず Unity SDK のみ提供。
+直接 Kotlin/Java からカメラ・空間アンカーを叩く経路は存在しないため、
+**最小 Unity プロジェクトを SDK アダプタ層として挟む**方針を採用。
+
+RN 本体のコードはほぼ変更せず、camera source (`xreal-eye`) の切替で
+Unity 経由の経路を使う。将来の 3D 表示 / 空間アンカー拡張も同じ Unity プロジェクトを育てるだけで足りる。
+
+### アーキテクチャ
+
+```
+┌─ RN (guidey 本体) ────────────────────────────┐
+│  UI / LLM / API / 音声 — 既存のまま           │
+│                                                │
+│  lib/xreal/ ★ アダプタ                        │
+│   ├─ bridge.ts          singleton、JSON 相関ID │
+│   ├─ camera.ts          captureXrealFrame()    │
+│   ├─ UnityBridgeView    _layout で 1×1 mount   │
+│   └─ types.ts           request/response 型    │
+│                                                │
+│  useCameraCapture(ref): xreal-eye → bridge 経由│
+└───────────────┬────────────────────────────────┘
+                │ @azesmway/react-native-unity
+                │  (postMessage / onUnityMessage)
+┌───────────────▼─ Unity (mobile/unity/) ───────┐
+│  最小シーン 1 枚 + アダプタ MonoBehaviour 群   │
+│                                                │
+│  Assets/Scripts/                               │
+│   ├─ UnityInterop.cs     SendToRN 薄ラッパ     │
+│   ├─ CameraBridge.cs     NRRGBCamTexture 取得  │
+│   ├─ (future) SpatialBridge.cs   anchors取得  │
+│   └─ (future) RenderBridge.cs    3D prefab描画│
+│                                                │
+│  XREAL SDK 3.0+ (公式 Unity パッケージ)        │
+└────────────────────────────────────────────────┘
+```
+
+### プロトコル
+
+JSON + 相関 ID (UUID) で request-response 化。タイムアウト 3-5 秒。
+
+```json
+// RN → Unity
+{ "id": "ab12-cd34", "method": "Capture", "args": {} }
+
+// Unity → RN (成功)
+{ "id": "ab12-cd34", "kind": "camera",
+  "data": "{\"uri\":\"file:///data/.../frame-xxx.jpg\"}" }
+
+// Unity → RN (失敗)
+{ "id": "ab12-cd34", "kind": "camera",
+  "error": "camera not ready" }
+```
+
+Unity の `JsonUtility` はネスト JSON を文字列として持つ仕様なので、`data` は文字列で包む。
+bridge.ts 側で JSON.parse して正規化。
+
+### 段階的ロードマップ
+
+| Phase | Unity 側 | RN 側 | Unity View サイズ |
+|---|---|---|---|
+| **1. カメラ** (今ここ) | CameraBridge.cs で RGB Eye フレーム取得 | useCameraCapture が xreal-eye 経路で bridge.capture() を呼ぶ | **1×1 hidden** |
+| **2. 空間アンカー読出** | SpatialBridge.cs: anchors / planes 列挙、変更時に push | RN が anchors リストを持ち、LLM プロンプトに注入 (「anchor #3 = 作業台」等) | 1×1 hidden のまま |
+| **3. 3D 描画** | RenderBridge.cs: DrawArrow(anchor_id, pose, text) 等の primitive | LLM が「anchor #3 に矢印」と返したら bridge.draw() を呼ぶ | **全画面 transparent** に切替 (光学シースルーで現実に重畳) |
+| **4. 永続化 + RAG** | SpatialBridge が saveAnchor/loadAnchor | BE に anchor_id ↔ 作業メタデータを紐付け保存 (SQLite 拡張) | 前と同じ |
+
+### 設計原則
+
+- **責務**: Unity = 「空間と 3D の世界」、RN = 「業務ロジック・UI・LLM」
+- **永続ライフサイクル**: Unity View は app root (`_layout.tsx`) で 1 個だけ mount し続ける (XREAL SDK 初期化が重いため再マウントしない)
+- **後方互換**: Phase 1 のコードは Phase 2 以降でも壊れない。bridge API は method 名を足していくだけ
+- **iOS/Web 非対応**: `UnityBridgeView` は Android 以外で null を返し、`useCameraCapture` は phone-back にフォールバック
+
+### トレードオフ
+
+| 項目 | 影響 |
+|---|---|
+| APK サイズ | **+50〜80MB** (Unity Runtime + XREAL SDK .aar) |
+| ビルド時間 | +1〜2 分 (Unity → Android Library Export → Gradle flat-dir) |
+| 開発環境 | **Unity 2023+ Editor が必要** (CI にも入れる必要あり) |
+| IPC オーバーヘッド | postMessage は文字列のみ。JPEG はファイル経由 (`file://` URI) 推奨。10 秒間隔なら余裕 |
+| Unity の二重ランタイム | メモリ使用増。Beam Pro (6GB RAM) なら許容範囲想定 |
+
+### 初期立ち上げ手順
+
+Unity プロジェクトの作成 / XREAL SDK import / C# スクリプト配置 / Android export の
+具体的な操作手順は [`mobile/unity/README.md`](../mobile/unity/README.md) に集約。
+
+`CameraBridge.cs` の **`// TODO(XREAL SDK)` 3 箇所** を埋めれば Phase 1 は完成する想定:
+
+1. `Start()`: `NRSessionManager` 初期化 + `NRRGBCamTexture.Play()`
+2. `CaptureCoroutine()`: `NRRGBCamTexture.Instance.GetTexture()` → Texture2D を取得
+3. `OnDestroy()`: `NRRGBCamTexture.Stop()`
+
+### 検証で詰まった場合の代替
+
+1. **素の Camera2 API で XREAL Eye が拾えた場合**: 本経路を使わず `expo-camera` のレンズ切替で終了
+2. **Unity 経路で初期化が不安定な場合**: Unity as a Library (UaaL) モードへ切替検討
+3. **XREAL SDK の商用ライセンス問題**: コミュニティリポジトリ ([mpv-android-vr](https://github.com/mpv-android-vr/mpv-android-vr) / [Skarian/one-xr](https://github.com/Skarian/one-xr)) 由来の抽出 JAR 利用を検討
 
 ---
 

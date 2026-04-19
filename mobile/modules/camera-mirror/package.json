@@ -1,0 +1,8 @@
+{
+  "name": "camera-mirror",
+  "version": "0.1.0",
+  "description": "iOS CAReplicatorLayer-based stereo camera view for Cardboard VR goggle usage.",
+  "main": "./index.ts",
+  "types": "./index.ts",
+  "private": true
+}

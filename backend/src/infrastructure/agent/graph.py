@@ -31,8 +31,9 @@ per-call inputs:
 """
 
 import logging
+import time
 from datetime import datetime
-from typing import Literal, TypedDict
+from typing import TypedDict
 
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -40,8 +41,8 @@ from langgraph.config import get_stream_writer
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from src.application.guide.blocks import AlertBlock
-from src.application.guide.outputs import CalibrationOutput, Stage1Output, Stage2Output
+from src.application.guide.schemas.blocks import AlertBlock
+from src.application.guide.schemas.outputs import CalibrationOutput, Stage1Output, Stage2Output
 from src.domain.guide.model import PlanStep, check_step_safety
 from src.domain.guide.service import GuideService
 from src.infrastructure.agent.tools import build_hq_tools
@@ -67,25 +68,26 @@ class GuideGraphState(TypedDict, total=False):
     """
 
     # --- セッションメタデータ (初回に /plan/{id} が seed する) ---
-    plan_steps: list[dict]         # [{step_number, text, visual_marker, frame_path}]
+    plan_steps: list[dict]  # [{step_number, text, visual_marker, frame_path}]
     plan_source_id: str
+    plan_title: str  # タイトル (生成プランは SQLite 非永続なので state に保持)
     total_steps: int
 
     # --- 進捗 (変化する) ---
     current_step_index: int
-    step_started_at: str           # ISO datetime、next 判定時に更新
+    step_started_at: str  # ISO datetime、next 判定時に更新
 
     # --- 短期メモリ ---
     recent_observations: list[str]  # 直近 3 件 (safety ノードで append)
-    chat_history: list[dict]        # 直近 10 件 [{role, content}]
+    chat_history: list[dict]  # 直近 10 件 [{role, content}]
 
     # --- コスト管理 ---
     total_calls: int
     stage2_calls: int
 
     # --- ノード出力スナップショット (毎ターン上書き) ---
-    stage1: dict | None             # Stage1Output.model_dump()
-    stage2: dict | None             # Stage2Output.model_dump()
+    stage1: dict | None  # Stage1Output.model_dump()
+    stage2: dict | None  # Stage2Output.model_dump()
     escalated: bool
     judgment: str
     confidence: float
@@ -146,7 +148,8 @@ def apply_safety(
         if next_idx >= len(plan_steps):
             logger.info(
                 "[safety] next blocked: already at last step (%d/%d)",
-                current_step_index + 1, len(plan_steps),
+                current_step_index + 1,
+                len(plan_steps),
             )
             return {
                 "judgment": "continue",
@@ -161,7 +164,8 @@ def apply_safety(
         if current_step_duration_sec < MIN_STEP_DURATION_SEC:
             logger.info(
                 "[safety] next blocked: current step only %ds (min %ds)",
-                current_step_duration_sec, MIN_STEP_DURATION_SEC,
+                current_step_duration_sec,
+                MIN_STEP_DURATION_SEC,
             )
             return {
                 "judgment": "continue",
@@ -221,14 +225,16 @@ def _step_duration_sec(state: GuideGraphState) -> int:
 
 
 def _build_stage1_prompt(
-    state: GuideGraphState, pipeline_type: str, user_message: str | None,
+    state: GuideGraphState,
+    pipeline_type: str,
+    user_message: str | None,
     guide_service: GuideService,
 ) -> str:
     """pipeline_type とステップ有無で 3 種類のプロンプトを出し分ける。
 
-      periodic        : build_judgment_prompt       (定期判定)
-      user_action+plan: build_user_action_prompt    (プランあり + 発話)
-      user_action+none: build_explore_prompt        (探索モード)
+    periodic        : build_judgment_prompt       (定期判定)
+    user_action+plan: build_user_action_prompt    (プランあり + 発話)
+    user_action+none: build_explore_prompt        (探索モード)
     """
     current, nxt = _current_and_next(state)
     idx = state.get("current_step_index", 0)
@@ -260,8 +266,10 @@ def _build_stage1_prompt(
 
 
 def _build_stage2_prompt(
-    state: GuideGraphState, escalation_reason: str,
-    user_message: str | None, guide_service: GuideService,
+    state: GuideGraphState,
+    escalation_reason: str,
+    user_message: str | None,
+    guide_service: GuideService,
 ) -> str:
     """Stage 2 エスカレーションプロンプト。"""
     current, nxt = _current_and_next(state)
@@ -280,8 +288,8 @@ def _build_stage2_prompt(
 def _should_escalate(stage1: Stage1Output, pipeline_type: str) -> bool:
     """エスカレーション条件。
 
-      periodic    : anomaly + can_handle=False のみ (速度優先)
-      user_action : can_handle=False なら常に (正確性優先)
+    periodic    : anomaly + can_handle=False のみ (速度優先)
+    user_action : can_handle=False なら常に (正確性優先)
     """
     if stage1.can_handle:
         return False
@@ -336,32 +344,47 @@ def build_guide_graph(
 
         prompt = _build_stage1_prompt(state, pipeline_type, user_message, guide_service)
 
+        logger.info(
+            "[stage1] call pipeline=%s image=%s prompt_len=%d",
+            pipeline_type,
+            "yes" if image_bytes else "no",
+            len(prompt),
+        )
+        t0 = time.monotonic()
+
         # Structured Output なので JSON パース不要、型安全
         stage1: Stage1Output = await llm_client.call_structured(
             system_prompt=prompt,
             schema=Stage1Output,
             image_bytes=image_bytes,
         )
+        dt_ms = (time.monotonic() - t0) * 1000
         escalated = _should_escalate(stage1, pipeline_type)
 
         logger.info(
-            "[stage1] j=%s conf=%.2f can_handle=%s esc=%s msg='%s'",
-            stage1.judgment, stage1.confidence, stage1.can_handle,
-            escalated, stage1.message[:50],
+            "[stage1] j=%s conf=%.2f can_handle=%s esc=%s dt=%.0fms msg='%s'",
+            stage1.judgment,
+            stage1.confidence,
+            stage1.can_handle,
+            escalated,
+            dt_ms,
+            stage1.message[:50],
         )
 
         # エスカレーション時のみ中間イベントを emit (stage2 の待ち時間を埋める)
         if escalated:
             writer = get_stream_writer()
-            writer({
-                "stage": 1,
-                "escalated": True,
-                "judgment": stage1.judgment,
-                "confidence": stage1.confidence,
-                "message": stage1.message or "少し調べますね。",
-                "blocks": [],
-                "current_step_index": state.get("current_step_index", 0),
-            })
+            writer(
+                {
+                    "stage": 1,
+                    "escalated": True,
+                    "judgment": stage1.judgment,
+                    "confidence": stage1.confidence,
+                    "message": stage1.message or "少し調べますね。",
+                    "blocks": [],
+                    "current_step_index": state.get("current_step_index", 0),
+                }
+            )
 
         # state に結果を書き込み (safety / stage2 で使う)
         return {
@@ -389,9 +412,13 @@ def build_guide_graph(
             # このノードは route_entry で precomputed_stage1 有り判定済み。
             # 念のため fallback: continue 扱い。
             return {
-                "stage1": None, "escalated": False,
-                "judgment": "continue", "confidence": 0.0, "message": "",
-                "blocks": [], "stage2": None,
+                "stage1": None,
+                "escalated": False,
+                "judgment": "continue",
+                "confidence": 0.0,
+                "message": "",
+                "blocks": [],
+                "stage2": None,
             }
         stage1 = Stage1Output.model_validate(raw)
         pipeline_type = cfg.get("pipeline_type", "periodic")
@@ -399,20 +426,25 @@ def build_guide_graph(
 
         logger.info(
             "[stage1/edge] j=%s conf=%.2f esc=%s msg='%s'",
-            stage1.judgment, stage1.confidence, escalated, stage1.message[:50],
+            stage1.judgment,
+            stage1.confidence,
+            escalated,
+            stage1.message[:50],
         )
 
         if escalated:
             writer = get_stream_writer()
-            writer({
-                "stage": 1,
-                "escalated": True,
-                "judgment": stage1.judgment,
-                "confidence": stage1.confidence,
-                "message": stage1.message or "少し調べますね。",
-                "blocks": [],
-                "current_step_index": state.get("current_step_index", 0),
-            })
+            writer(
+                {
+                    "stage": 1,
+                    "escalated": True,
+                    "judgment": stage1.judgment,
+                    "confidence": stage1.confidence,
+                    "message": stage1.message or "少し調べますね。",
+                    "blocks": [],
+                    "current_step_index": state.get("current_step_index", 0),
+                }
+            )
 
         return {
             "stage1": stage1.model_dump(),
@@ -453,7 +485,10 @@ def build_guide_graph(
             )
             logger.info(
                 "[stage2] j=%s conf=%.2f artifacts=%d msg='%s'",
-                stage2.judgment, stage2.confidence, len(artifacts), stage2.message[:50],
+                stage2.judgment,
+                stage2.confidence,
+                len(artifacts),
+                stage2.message[:50],
             )
             return {
                 "stage2": stage2.model_dump(),
@@ -535,15 +570,17 @@ def build_guide_graph(
         # --- 最終 SSE イベント ---
         final_stage = 2 if state.get("escalated") else 1
         writer = get_stream_writer()
-        writer({
-            "stage": final_stage,
-            "escalated": bool(state.get("escalated")),
-            "judgment": safe["judgment"],
-            "confidence": safe["confidence"],
-            "message": safe["message"],
-            "blocks": safe["blocks"],
-            "current_step_index": updates.get("current_step_index", state.get("current_step_index", 0)),
-        })
+        writer(
+            {
+                "stage": final_stage,
+                "escalated": bool(state.get("escalated")),
+                "judgment": safe["judgment"],
+                "confidence": safe["confidence"],
+                "message": safe["message"],
+                "blocks": safe["blocks"],
+                "current_step_index": updates.get("current_step_index", state.get("current_step_index", 0)),
+            }
+        )
         return updates
 
     # ------------------------------------------------------------------
@@ -557,12 +594,17 @@ def build_guide_graph(
         writer = get_stream_writer()
 
         if not image_bytes or not steps:
-            writer({
-                "stage": 1, "escalated": False,
-                "judgment": "calibrated", "confidence": 0.0,
-                "message": "画像または計画が不足しています",
-                "blocks": [], "current_step_index": 0,
-            })
+            writer(
+                {
+                    "stage": 1,
+                    "escalated": False,
+                    "judgment": "calibrated",
+                    "confidence": 0.0,
+                    "message": "画像または計画が不足しています",
+                    "blocks": [],
+                    "current_step_index": 0,
+                }
+            )
             return {
                 "judgment": "calibrated",
                 "current_step_index": 0,
@@ -578,18 +620,22 @@ def build_guide_graph(
         idx = max(0, min(result.step_number - 1, len(steps) - 1))
         logger.info(
             "[calibrate] step=%d conf=%.2f msg='%s'",
-            idx + 1, result.confidence, result.message[:50],
+            idx + 1,
+            result.confidence,
+            result.message[:50],
         )
 
-        writer({
-            "stage": 1,
-            "escalated": False,
-            "judgment": "calibrated",
-            "confidence": result.confidence,
-            "message": f"Step {idx + 1} から開始: {result.message}",
-            "blocks": [],
-            "current_step_index": idx,
-        })
+        writer(
+            {
+                "stage": 1,
+                "escalated": False,
+                "judgment": "calibrated",
+                "confidence": result.confidence,
+                "message": f"Step {idx + 1} から開始: {result.message}",
+                "blocks": [],
+                "current_step_index": idx,
+            }
+        )
         return {
             "judgment": "calibrated",
             "confidence": result.confidence,
@@ -604,9 +650,9 @@ def build_guide_graph(
     def route_entry(state: GuideGraphState, config: RunnableConfig) -> str:
         """START → calibrate | seed_stage1 | stage1 の振り分け。
 
-          is_calibration=True         → calibrate
-          precomputed_stage1 あり     → seed_stage1  (エッジ推論経路)
-          それ以外                    → stage1        (cloud 推論経路)
+        is_calibration=True         → calibrate
+        precomputed_stage1 あり     → seed_stage1  (エッジ推論経路)
+        それ以外                    → stage1        (cloud 推論経路)
         """
         cfg = _cfg(config)
         if cfg.get("is_calibration"):
@@ -630,16 +676,19 @@ def build_guide_graph(
     sg.add_node("calibrate", calibrate_node)
 
     sg.add_conditional_edges(
-        START, route_entry,
+        START,
+        route_entry,
         {"calibrate": "calibrate", "stage1": "stage1", "seed_stage1": "seed_stage1"},
     )
     # stage1 と seed_stage1 は同じ判定で次に進む
     sg.add_conditional_edges(
-        "stage1", route_after_stage1,
+        "stage1",
+        route_after_stage1,
         {"stage2": "stage2", "safety": "safety"},
     )
     sg.add_conditional_edges(
-        "seed_stage1", route_after_stage1,
+        "seed_stage1",
+        route_after_stage1,
         {"stage2": "stage2", "safety": "safety"},
     )
     sg.add_edge("stage2", "safety")

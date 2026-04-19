@@ -35,14 +35,26 @@ def _build_schema() -> CollectionSchema:
 
 # v2 で追加された output_fields
 _V2_OUTPUT_FIELDS = [
-    "video_id", "step_number", "total_steps", "text", "frame_path",
-    "visual_marker", "frame_start_path", "frame_mid_path", "frame_end_path",
-    "quality_score", "duration_sec",
+    "video_id",
+    "step_number",
+    "total_steps",
+    "text",
+    "frame_path",
+    "visual_marker",
+    "frame_start_path",
+    "frame_mid_path",
+    "frame_end_path",
+    "quality_score",
+    "duration_sec",
 ]
 
 # v1 互換 (既存コレクションにv2フィールドがない場合)
 _V1_OUTPUT_FIELDS = [
-    "video_id", "step_number", "total_steps", "text", "frame_path",
+    "video_id",
+    "step_number",
+    "total_steps",
+    "text",
+    "frame_path",
 ]
 
 
@@ -111,7 +123,7 @@ class MilvusRAGClient:
                 "frame_caption": step.get("frame_caption", ""),
                 "caption_embedding": step.get("caption_embedding", [0.0] * EMBEDDING_DIM),
             }
-            for step, emb in zip(steps, embeddings)
+            for step, emb in zip(steps, embeddings, strict=False)
         ]
         result = self._client.insert(collection_name=collection, data=data)
         count = result.get("insert_count", len(data))

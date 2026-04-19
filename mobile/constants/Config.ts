@@ -1,3 +1,7 @@
 export const TRIGGER_WORDS = ["次", "できた", "教えて"];
 
-export const DEFAULT_API_URL = "http://10.32.1.44:8000";
+/**
+ * BE エンドポイント。ビルド時に `EXPO_PUBLIC_API_URL` 環境変数で決まる。
+ */
+export const API_URL =
+  process.env.EXPO_PUBLIC_API_URL ?? "http://0.0.0.0:8000";

@@ -5,19 +5,19 @@ import { fetchPlan } from "@/lib/api";
 import type { Plan } from "@/lib/types";
 
 /**
- * plan_source_id からプランをロード。
- * fetchPlan は副作用として BE 側で session を seed し、session_id を返す。
+ * plan_source_id + session_id からプランをロード。
+ * BE は既存 session に plan_steps を注入してから Plan を返す。
  */
-export function usePlan(planSourceId: string | null) {
+export function usePlan(planSourceId: string | null, sessionId: string | null) {
   const { apiUrl } = useApiContext();
   const [plan, setPlan] = useState<Plan | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    if (!planSourceId) return;
+    if (!planSourceId || !sessionId) return;
     let cancelled = false;
 
-    fetchPlan(apiUrl, planSourceId)
+    fetchPlan(apiUrl, planSourceId, sessionId)
       .then((p) => {
         if (cancelled) return;
         setPlan(p);
@@ -34,7 +34,7 @@ export function usePlan(planSourceId: string | null) {
     return () => {
       cancelled = true;
     };
-  }, [apiUrl, planSourceId]);
+  }, [apiUrl, planSourceId, sessionId]);
 
   return { plan, error };
 }

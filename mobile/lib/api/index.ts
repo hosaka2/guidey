@@ -1,5 +1,6 @@
 export { ApiError } from "./client";
-export { callPeriodicStream } from "./periodic";
+export { callPeriodicStream, callPeriodicSync } from "./periodic";
+export type { PeriodicSyncResponse } from "./periodic";
 export { callChatStream } from "./chat";
 export { fetchPlan, generatePlan } from "./plan";
 export { startSession } from "./session";

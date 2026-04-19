@@ -55,10 +55,11 @@ mobile/
 │   │   ├── View.tsx / Text.tsx / Pressable.tsx  (Tamagui / RN をラップ)
 │   │   ├── Panel.tsx          borderCurve: "continuous" を内包
 │   │   └── index.ts           アプリコードは常にここから import
-│   ├── layout/                ★ デバイスバリアント
-│   │   ├── PhoneVRLayout.tsx  スマホVRゴーグル用 3 カラム
-│   │   ├── SmartGlassesLayout.tsx  スマートグラス HUD (低情報密度)
-│   │   ├── GuideLayout.tsx    useLayoutVariant で dispatch
+│   ├── layout/                ★ デバイスバリアント (3 種)
+│   │   ├── PhoneLandscapeLayout.tsx  手持ち横持ち 3 カラム
+│   │   ├── PhoneVRLayout.tsx         Cardboard 系 VR ゴーグル、両目ステレオ分割
+│   │   ├── SmartGlassesLayout.tsx    Xreal 等、透明 HUD (カメラ描画なし)
+│   │   ├── GuideLayout.tsx           useLayoutVariant で dispatch
 │   │   └── index.ts
 │   ├── blocks/                ブロック種別ごとのビュー (Text/Image/Video/Timer/Alert)
 │   ├── BlockRenderer.tsx      blocks → 各 View にルーティング
@@ -80,11 +81,17 @@ mobile/
 │   │   ├── feedback.ts        submitFeedback
 │   │   └── index.ts
 │   ├── edge-llm/              ★ Stage1 差し込み口 (BE の seed_stage1 と対)
-│   │   ├── types.ts           Stage1Runner interface, Stage1Input/Output
+│   │   ├── types.ts           Stage1Runner interface, Stage1Input/Output, buildEdgePrompt
 │   │   ├── cloud.ts           no-op (null 返す = BE 任せ)
-│   │   ├── gemma-local.ts     スタブ (llama.rn 等で実装予定)
-│   │   ├── apple-foundation.ts スタブ (FoundationModels ブリッジ)
-│   │   └── index.ts           getStage1Runner(mode)
+│   │   ├── gemma-local.ts     llama.rn + Gemma 4 E2B VLM (mmproj 画像入力)
+│   │   ├── model-manager.ts   GGUF バンドル (本体 + mmproj) の DL / キャッシュ
+│   │   └── index.ts           getStage1Runner(mode), runner singleton
+│   ├── hooks/useCameraCapture.ts  ★ カメラソース抽象 (phone-back / xreal-eye)
+│   ├── xreal/                  ★ Unity bridge (XREAL SDK アダプタ経由)
+│   │   ├── bridge.ts           singleton、postMessage + 相関 ID で Promise 化
+│   │   ├── camera.ts           captureXrealFrame / isXrealCameraReady
+│   │   ├── UnityBridgeView.tsx _layout で 1×1 hidden マウント
+│   │   └── types.ts            request/response の型
 │   ├── theme/                 ★ デザイン 2 系統
 │   │   ├── tokens.ts          space / radius / fontSize / color
 │   │   ├── variants.ts        phoneVR / smartGlasses テーマ
@@ -171,21 +178,23 @@ export interface Stage1Runner {
 }
 ```
 
-### 実装の 3 パターン
+### 実装の 2 パターン
 
-| Runner | 状態 | 置き場 | 技術候補 |
+| Runner | 状態 | 置き場 | 技術 |
 |---|---|---|---|
 | `CloudStage1Runner` | ✓ 既定 (no-op、null 返す) | `cloud.ts` | - |
-| `GemmaLocalRunner` |  | `gemma-local.ts` | llama.rn / react-native-mlc-llm / WebLLM (WebView) |
-| `AppleFoundationRunner` |  | `apple-foundation.ts` | FoundationModels framework + Swift Bridge (Expo Modules) |
+| `GemmaLocalRunner` | ✓ 実装済 (VLM 対応) | `gemma-local.ts` | llama.rn + Gemma 4 E2B GGUF (本体 Q4_K_M + mmproj-F16) |
+
+> Apple FoundationModels は画像入力 (VLM) をサポートしないため対象外。
+> Vision framework でのキャプション化 + LM の二段構成は真の VLM として成立しないので採用しない。
 
 ### 切替
 
 ```ts
-// features/autonomous/hooks/useAutonomousLoop.ts
-useAutonomousLoop({ ..., edgeMode: "gemma-local" });  // この1箇所で
+// Settings 画面の edgeMode トグルで切替 (ApiContext + AsyncStorage 永続化)。
+// useAutonomousLoop は ApiContext から edgeMode を読むので、呼び出し側は意識不要。
 
-// 失敗時は cloud に自動フォールバック (try/catch + null)
+// 失敗時は cloud に自動フォールバック (try/catch + null、isReady() ガード)
 ```
 
 ---
@@ -217,14 +226,23 @@ export const GuideLayout = forwardRef((props, ref) => {
 });
 ```
 
+### XREAL (Beam Pro) 対応
+
+Unity を XREAL SDK アダプタ層として挟み、RN 本体はそのまま camera source 切替だけで XREAL Eye を使う。
+設計方針 / 3D モードへの拡張計画は [future-design.md §XREAL](future-design.md#xreal-unity-adapter) を参照。
+Unity プロジェクト側のセットアップ手順は [`mobile/unity/README.md`](../mobile/unity/README.md)。
+
 ### レイアウト比較
 
-| 項目 | PhoneVRLayout | SmartGlassesLayout |
-|---|---|---|
-| 想定端末 | スマホをVRゴーグル装着 (Meta Quest 似) | Xreal / Rokid / Apple Vision Pro |
-| カラム | 3 (Timer + Chat / Camera / Media) | 単一中央 HUD |
-| 文字 | 標準 | 大 (遠視野想定) |
-| 操作 | タップ + 音声 | ほぼ音声のみ |
+| 項目 | PhoneLandscapeLayout | PhoneVRLayout | SmartGlassesLayout |
+|---|---|---|---|
+| 想定端末 | 手持ち横持ちスマホ | Cardboard 系 VR ゴーグル装着 | Xreal / Rokid / Viture (光学シースルー) |
+| カメラ | 全画面背景 | ステレオ両目 (iOS=CAReplicatorLayer / Android=view-shot フォールバック) | 描画せず (画面外マウント、推論用のみ) |
+| カラム | 3 (Timer+Chat / Camera / Media) | 両目ステレオ分割 (IPD ガター) | 単一 HUD (上部+中央) |
+| 文字 | 標準 (fontSize.md) | 大きめ (レンズ越し) | 最大 (遠視野) |
+| 情報量 | maxBlocks=10 | maxBlocks=3 | maxBlocks=2 |
+| 背景 | camera | camera-stereo | transparent (黒=透過) |
+| 操作 | タップ + 音声 | 音声主体 (タップは底バーのみ) | ほぼ音声のみ |
 
 ### 設計判断
 

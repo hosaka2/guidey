@@ -56,6 +56,7 @@ stage2_latency = meter.create_histogram(
 
 # === /metrics 用の軽量集計 (OTel の ConsoleExporter とは別) ===
 
+
 @dataclass
 class _CallRecord:
     pipeline_type: str
@@ -89,10 +90,15 @@ class PipelineMetrics:
     ) -> None:
         """パイプライン完了を記録 (OTel + 内部集計)."""
         with self._lock:
-            self._records.append(_CallRecord(
-                pipeline_type=pipeline_type, stage=stage,
-                latency_ms=latency_ms, judgment=judgment, escalated=escalated,
-            ))
+            self._records.append(
+                _CallRecord(
+                    pipeline_type=pipeline_type,
+                    stage=stage,
+                    latency_ms=latency_ms,
+                    judgment=judgment,
+                    escalated=escalated,
+                )
+            )
             self.total_calls += 1
             if escalated:
                 self.total_stage2_calls += 1

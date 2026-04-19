@@ -120,11 +120,13 @@ def route_entry(state) -> str:
 
 ### `stage1` — 高速判定 (Structured Output)
 
-- モデル: `OllamaClient` (Gemma4:e2b)、または将来 Apple Foundation Models / Gemini Nano
+- モデル: `OllamaClient` (Gemma4:e2b)、または将来 Gemini Nano 等
 - 入力: 画像 + prompt (periodic / user_action / explore で内容違い)
 - 出力: `Stage1Output { judgment, confidence, message, can_handle, escalation_reason }`
 - `can_handle=false` ならエスカレーション → stage2
 - 非エスカレーションで `message` があれば Proactive 声かけ
+- **設計思想**: 「画像が必要か」を事前分類する pre-stage は置かない。Stage1 自体が
+  軽量 LLM による判定レイヤであり、重複した意図分類は複雑さに見合う効果が無いため
 
 ```python
 async def stage1_node(state):
@@ -239,24 +241,71 @@ async def calibrate_node(state):
 
 ## エッジ (edges)
 
+### 可視化 (Mermaid)
+
+`graph.get_graph().draw_mermaid()` で自動生成した現在のグラフ構造:
+
+```mermaid
+graph TD;
+    __start__([__start__]):::first
+    stage1(stage1)
+    seed_stage1(seed_stage1)
+    stage2(stage2)
+    safety(safety)
+    calibrate(calibrate)
+    __end__([__end__]):::last
+    __start__ -.-> calibrate
+    __start__ -.-> seed_stage1
+    __start__ -.-> stage1
+    seed_stage1 -.-> safety
+    seed_stage1 -.-> stage2
+    stage1 -.-> safety
+    stage1 -.-> stage2
+    stage2 --> safety
+    calibrate --> __end__
+    safety --> __end__
+    classDef default fill:#f2f0ff,line-height:1.2
+    classDef first fill-opacity:0
+    classDef last fill:#bfb6fc
+```
+
+- 点線 (`-.->`) は conditional edge、実線 (`-->`) は無条件遷移
+- `stage1` / `seed_stage1` は `route_after_stage1` で分岐、escalated=true → `stage2`、false → `safety`
+- `stage2` は必ず `safety` を経由して END
+
+### 構築コード
+
 ```python
 sg = StateGraph(GuideGraphState)
 sg.add_node("stage1", stage1_node)
+sg.add_node("seed_stage1", seed_stage1_node)   # エッジ推論経路
 sg.add_node("stage2", stage2_node)
 sg.add_node("safety", safety_node)
 sg.add_node("calibrate", calibrate_node)
 
 sg.add_conditional_edges(
     START, route_entry,
-    {"calibrate": "calibrate", "stage1": "stage1"},
+    {"calibrate": "calibrate", "stage1": "stage1", "seed_stage1": "seed_stage1"},
 )
-sg.add_conditional_edges(
-    "stage1", after_stage1,
-    {"stage2": "stage2", "safety": "safety"},
-)
+sg.add_conditional_edges("stage1", route_after_stage1,
+                         {"stage2": "stage2", "safety": "safety"})
+sg.add_conditional_edges("seed_stage1", route_after_stage1,
+                         {"stage2": "stage2", "safety": "safety"})
 sg.add_edge("stage2", "safety")
 sg.add_edge("safety", END)
 sg.add_edge("calibrate", END)
+```
+
+### 図の再生成
+
+```bash
+cd backend
+.venv/bin/python -c "
+from unittest.mock import AsyncMock, MagicMock
+from src.infrastructure.agent.graph import build_guide_graph
+print(build_guide_graph(guide_service=MagicMock(), llm_client=AsyncMock())
+      .get_graph().draw_mermaid())
+"
 ```
 
 ### エスカレーション条件
@@ -334,19 +383,19 @@ async def periodic(file, session_id, is_calibration, ...):
 
 ---
 
-## エッジ LLM 計画 (Pattern A: 持ち込み)
+## エッジ LLM 計画
 
-### 現在
+### BE
 
 ```
 mobile → POST /periodic (image)
          BE graph: stage1 → [escalate?] → stage2 → safety → END
 ```
 
-### 将来 (stage1 on-device)
+### エッジ
 
 ```
-mobile: ローカル推論 (Apple Foundation Models / Gemma 2B on-device)
+mobile: ローカル推論 (Gemma 4 E2B VLM on-device via llama.rn)
    └─ POST /guide/periodic (or /chat)
         form-data: file + session_id + stage1_result={JSON}
       BE graph: seed_stage1 ノード経由 → (stage2 | safety) → END
@@ -378,7 +427,7 @@ def route_entry(state, config):
 | 項目 | 対応 |
 |---|---|
 | Stage1Output の型同期 | `outputs.py` を OpenAPI 経由 or 手動で TS に写す |
-| エッジ推論モジュール | Apple Foundation Models / CoreML / MLX など |
+| エッジ推論モジュール | llama.rn + Gemma 4 E2B GGUF (本体 + mmproj) |
 | 推論プロンプトの同期 | `src/domain/guide/prompts/*` を同じ形式でモバイルに配布 |
 | リクエスト組み立て | `stage1_result=JSON` を form-data に追加するだけ |
 
@@ -596,10 +645,12 @@ backend/src/
 ├── application/
 │   ├── dependencies.py        # DI (get_checkpointer / get_guide_graph シングルトン)
 │   └── guide/
-│       ├── outputs.py         # Stage1Output / Stage2Output / CalibrationOutput
-│       ├── blocks.py          # UIブロック型 (Text/Image/Video/Timer/Alert)
-│       ├── plan_use_case.py   # プラン生成 (graph とは独立)
-│       └── schemas.py         # API Pydantic (Plan, Feedback 等)
+│       ├── usecases/
+│       │   └── plan_use_case.py   # プラン生成 (graph とは独立)
+│       └── schemas/
+│           ├── api.py             # API Pydantic (Plan, Feedback 等)
+│           ├── outputs.py         # Stage1Output / Stage2Output / CalibrationOutput
+│           └── blocks.py          # UIブロック型 (Text/Image/Video/Timer/Alert)
 ├── infrastructure/
 │   ├── agent/
 │   │   ├── graph.py           # ★ GuideGraph 本体: state + 全ノード + build_guide_graph

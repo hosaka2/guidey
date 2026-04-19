@@ -24,10 +24,12 @@ from opentelemetry.sdk.trace.export import BatchSpanProcessor, ConsoleSpanExport
 
 logger = logging.getLogger(__name__)
 
-_RESOURCE = Resource.create({
-    "service.name": "guidey-backend",
-    "service.version": "0.1.0",
-})
+_RESOURCE = Resource.create(
+    {
+        "service.name": "guidey-backend",
+        "service.version": "0.1.0",
+    }
+)
 
 
 def init_telemetry(enable_console: bool = True) -> None:
@@ -36,9 +38,7 @@ def init_telemetry(enable_console: bool = True) -> None:
     # --- Traces ---
     tracer_provider = TracerProvider(resource=_RESOURCE)
     if enable_console:
-        tracer_provider.add_span_processor(
-            BatchSpanProcessor(ConsoleSpanExporter())
-        )
+        tracer_provider.add_span_processor(BatchSpanProcessor(ConsoleSpanExporter()))
     trace.set_tracer_provider(tracer_provider)
 
     # --- Metrics ---

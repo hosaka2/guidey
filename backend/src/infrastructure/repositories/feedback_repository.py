@@ -145,8 +145,19 @@ class SqliteFeedbackRepository:
                    (feedback_id, user_id, session_id, target_type, target_id,
                     target_content, sentiment, source, raw_content, rag_chunks_used, step_index)
                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                (fid, user_id, fb.session_id, fb.target_type, fb.target_id,
-                 fb.target_content, fb.sentiment, fb.source, fb.raw_content, "", fb.step_index),
+                (
+                    fid,
+                    user_id,
+                    fb.session_id,
+                    fb.target_type,
+                    fb.target_id,
+                    fb.target_content,
+                    fb.sentiment,
+                    fb.source,
+                    fb.raw_content,
+                    "",
+                    fb.step_index,
+                ),
             )
             conn.commit()
             logger.info("Feedback saved: %s %s/%s", fid, fb.target_type, fb.sentiment)
@@ -162,8 +173,15 @@ class SqliteFeedbackRepository:
                 """INSERT INTO failed_plans
                    (id, user_id, plan_source_id, task_description, abandoned_at_step, reason, rag_source_ids)
                    VALUES (?, ?, ?, ?, ?, ?, ?)""",
-                (fid, user_id, fp.plan_source_id, fp.task_description,
-                 fp.abandoned_at_step, fp.reason, fp.rag_source_ids),
+                (
+                    fid,
+                    user_id,
+                    fp.plan_source_id,
+                    fp.task_description,
+                    fp.abandoned_at_step,
+                    fp.reason,
+                    fp.rag_source_ids,
+                ),
             )
             conn.commit()
         finally:

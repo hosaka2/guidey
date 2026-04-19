@@ -1,9 +1,9 @@
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef } from "react";
 
 import { useApiContext } from "@/contexts/ApiContext";
 import type { CameraViewHandle } from "@/components/CameraView";
 import { callChatStream } from "@/lib/api";
-import type { SpeakType } from "@/lib/hooks";
+import { useCameraCapture, type SpeakType } from "@/lib/hooks";
 import type { Block, StageEvent } from "@/lib/types";
 
 type Options = {
@@ -32,12 +32,26 @@ export function useChat({
   onEnter, onExit, acquireLock, releaseLock,
 }: Options) {
   const { apiUrl } = useApiContext();
+  const capture = useCameraCapture(cameraRef);
   // isSending は UI で描画しないので ref で OK (再レンダー不要)
   const isSendingRef = useRef(false);
+  const abortCtrlRef = useRef<AbortController | null>(null);
+
+  // 画面 unmount 時に進行中の SSE を強制終了 (guide/explore から戻るケース)
+  useEffect(() => {
+    return () => {
+      abortCtrlRef.current?.abort();
+      abortCtrlRef.current = null;
+    };
+  }, []);
 
   const sendChat = useCallback(
     async (userMsg: string, withImage = true) => {
       if (isSendingRef.current) return;
+      if (!sessionId) {
+        console.warn("[Chat] skipped: session not ready");
+        return;
+      }
       isSendingRef.current = true;
       onEnter?.();
       acquireLock?.();
@@ -45,33 +59,44 @@ export function useChat({
       // "💬 ユーザー発話" をチャット欄に即表示
       onBlocks([{ type: "text", content: `💬 ${userMsg}`, style: "emphasis" }]);
 
-      const uri = withImage ? await cameraRef.current?.takePicture() : null;
+      const uri = withImage ? await capture() : null;
+      abortCtrlRef.current = new AbortController();
       try {
-        await callChatStream(apiUrl, userMsg, uri ?? null, sessionId, (ev: StageEvent) => {
-          const blocks: Block[] = [...(ev.blocks ?? [])];
-          if (ev.message) {
-            blocks.unshift({ type: "text", content: ev.message, style: "normal" });
-          }
-          if (blocks.length > 0) onBlocks(blocks);
-          if (ev.message) {
-            const speakType: SpeakType =
-              ev.stage === 1 && ev.escalated ? "advise" : "respond";
-            onSpeak(ev.message, speakType);
-          }
-        });
+        await callChatStream(
+          apiUrl, userMsg, uri ?? null, sessionId,
+          (ev: StageEvent) => {
+            const blocks: Block[] = [...(ev.blocks ?? [])];
+            if (ev.message) {
+              blocks.unshift({ type: "text", content: ev.message, style: "normal" });
+            }
+            if (blocks.length > 0) onBlocks(blocks);
+            if (ev.message) {
+              const speakType: SpeakType =
+                ev.stage === 1 && ev.escalated ? "advise" : "respond";
+              onSpeak(ev.message, speakType);
+            }
+          },
+          undefined,
+          abortCtrlRef.current.signal,
+        );
       } catch (err) {
-        console.warn("[Chat] error:", err);
-        onBlocks([
-          { type: "alert", message: "エラーが発生しました", severity: "warning" },
-        ]);
+        if ((err as Error)?.name === "AbortError") {
+          console.log("[Chat] aborted");
+        } else {
+          console.warn("[Chat] error:", err);
+          onBlocks([
+            { type: "alert", message: "エラーが発生しました", severity: "warning" },
+          ]);
+        }
       } finally {
+        abortCtrlRef.current = null;
         releaseLock?.();
         // conversation を抜けるまで少し待つ (TTS 完了後)
         setTimeout(() => onExit?.(), 3000);
         isSendingRef.current = false;
       }
     },
-    [apiUrl, sessionId, cameraRef,
+    [apiUrl, sessionId, capture,
      onBlocks, onSpeak, onEnter, onExit, acquireLock, releaseLock],
   );
 

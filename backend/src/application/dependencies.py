@@ -13,13 +13,13 @@ from fastapi import Depends
 from langgraph.checkpoint.redis.aio import AsyncRedisSaver
 from langgraph.graph.state import CompiledStateGraph
 
-from src.application.guide.chat_use_case import ChatUseCase
-from src.application.guide.feedback_use_case import FeedbackUseCase
-from src.application.guide.periodic_use_case import PeriodicUseCase
-from src.application.guide.plan_query_use_case import PlanQueryUseCase
-from src.application.guide.plan_use_case import PlanGenerateUseCase
-from src.application.guide.session_use_case import SessionUseCase
-from src.application.guide.analyze_use_case import AnalyzeUseCase
+from src.application.guide.usecases.analyze_use_case import AnalyzeUseCase
+from src.application.guide.usecases.chat_use_case import ChatUseCase
+from src.application.guide.usecases.feedback_use_case import FeedbackUseCase
+from src.application.guide.usecases.periodic_use_case import PeriodicUseCase
+from src.application.guide.usecases.plan_query_use_case import PlanQueryUseCase
+from src.application.guide.usecases.plan_use_case import PlanGenerateUseCase
+from src.application.guide.usecases.session_use_case import SessionUseCase
 from src.config import settings
 from src.domain.guide.service import GuideService
 from src.infrastructure.agent.agent import AgentClient
@@ -60,7 +60,8 @@ async def get_checkpointer() -> AsyncRedisSaver:
         await _checkpointer.asetup()
         logger.info(
             "Checkpointer ready (%s, ttl=%dmin)",
-            settings.redis_url, settings.session_ttl_min,
+            settings.redis_url,
+            settings.session_ttl_min,
         )
     return _checkpointer
 

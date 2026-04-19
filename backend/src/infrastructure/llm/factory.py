@@ -24,7 +24,9 @@ def get_hq_llm_client() -> LLMClient:
 
     if provider == "anthropic":
         from src.infrastructure.llm.claude import ClaudeClient
+
         return ClaudeClient()
 
     from src.infrastructure.llm.ollama import OllamaHQClient
+
     return OllamaHQClient()

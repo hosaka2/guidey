@@ -15,14 +15,14 @@ _PROMPTS_DIR = Path(__file__).parent / "prompts"
 # === バージョン定義 ===
 
 PROMPT_VERSIONS: dict[str, str] = {
-    "periodic_stage1": "v1",
-    "user_action_stage1": "v1",
-    "stage2_escalation": "v1",
-    "plan_generation": "v1",
-    "calibration": "v1",
-    "appraise_caption": "v1",
-    "analyze_oneshot": "v1",
-    "explore_stage1": "v1",
+    "periodic_stage1": "v2",
+    "user_action_stage1": "v2",
+    "stage2_escalation": "v2",
+    "plan_generation": "v2",
+    "calibration": "v2",
+    "appraise_caption": "v1",  # 1 行なので v2 未作成
+    "analyze_oneshot": "v1",  # 1-shot 用、頻度低いので据え置き
+    "explore_stage1": "v2",
 }
 
 
@@ -37,8 +37,6 @@ class Prompt:
     APPRAISE_CAPTION: str = "appraise_caption"
     ANALYZE_ONESHOT: str = "analyze_oneshot"
     EXPLORE_STAGE1: str = "explore_stage1"
-
-
 
 
 @functools.lru_cache(maxsize=32)

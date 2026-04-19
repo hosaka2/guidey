@@ -53,7 +53,7 @@ def extract_json_array(raw: str) -> list | None:
             last_brace = fragment.rfind("}")
             if last_brace > 0:
                 try:
-                    return json.loads(fragment[:last_brace + 1] + "]")
+                    return json.loads(fragment[: last_brace + 1] + "]")
                 except json.JSONDecodeError:
                     pass
 

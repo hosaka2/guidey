@@ -14,12 +14,56 @@ dependencies = [
     "langchain-ollama>=0.3",
     "langchain-core>=0.3",
     "setuptools<82",
-    "langgraph>=1.1.6",
+    "langgraph>=1.1.4",
     "langgraph-checkpoint-redis>=0.4",  # 要 Redis 8+ (RedisJSON/RediSearch 同梱)
     "rank-bm25>=0.2.2",
     "numpy>=2.4.4",
-    "opentelemetry-api>=1.41",
-    "opentelemetry-sdk>=1.41",
+    "opentelemetry-api>=1.40",
+    "opentelemetry-sdk>=1.40",
     "Pillow>=12",
     "redis>=7",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.8",
+    "pyright>=1.1.390",
+]
+
+[tool.uv]
+exclude-newer = "2 weeks"
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+src = ["src"]
+
+[tool.ruff.lint]
+select = [
+    "E", "F", "W",   # pycodestyle + pyflakes
+    "I",             # isort
+    "UP",            # pyupgrade
+    "B",             # bugbear
+    "SIM",           # flake8-simplify
+]
+ignore = [
+    "E501",          # line too long (フォーマッタ任せ)
+    "B008",          # fastapi Depends() を引数デフォルトに書くパターン
+    "E402",          # module import not at top — 循環依存回避の遅延 import を許容
+]
+
+[tool.ruff.lint.per-file-ignores]
+"src/domain/guide/prompts/*" = ["E", "F", "W"]
+
+[tool.pyright]
+include = ["src"]
+exclude = ["**/__pycache__", "**/.venv"]
+pythonVersion = "3.12"
+pythonPlatform = "Darwin"
+venvPath = "."
+venv = ".venv"
+# 一旦は import 漏れだけ必須で、LangChain / numpy / PIL 起因の型衝突は warning 扱い
+# (将来 strict 化する場合は "basic" or "strict" に戻す)
+typeCheckingMode = "off"
+reportMissingImports = "error"
+reportMissingTypeStubs = "none"

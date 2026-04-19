@@ -1,5 +1,12 @@
 import type { StageEvent } from "@/lib/types";
 
+/** Hermes には DOMException が無いので、name="AbortError" の Error で代替。 */
+function makeAbortError(tag: string): Error {
+  const err = new Error(`${tag}: aborted`);
+  err.name = "AbortError";
+  return err;
+}
+
 /**
  * SSE ストリームの共通リーダー。
  * React Native の fetch は body streaming 非対応のため XMLHttpRequest で実装。
@@ -14,13 +21,32 @@ export function streamSSE(
   formData: FormData,
   onEvent: (ev: StageEvent) => void,
   tag: string,
+  signal?: AbortSignal,
 ): Promise<void> {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      reject(makeAbortError(tag));
+      return;
+    }
+
     const xhr = new XMLHttpRequest();
     const t0 = Date.now();
     let lastIndex = 0;
     let buf = "";
     let firstChunkLogged = false;
+    let aborted = false;
+
+    const onAbort = () => {
+      aborted = true;
+      try {
+        xhr.abort();
+      } catch {
+        // ignore
+      }
+      signal?.removeEventListener("abort", onAbort);
+      reject(makeAbortError(tag));
+    };
+    signal?.addEventListener("abort", onAbort);
 
     const flushBuf = () => {
       let sep: number;
@@ -58,6 +84,7 @@ export function streamSSE(
     xhr.setRequestHeader("Accept", "text/event-stream");
 
     xhr.onreadystatechange = () => {
+      if (aborted) return;
       if (xhr.readyState >= 3 && xhr.status === 200) {
         if (!firstChunkLogged) {
           console.log(`[${tag}] first chunk ${Date.now() - t0}ms`);
@@ -68,6 +95,7 @@ export function streamSSE(
         flushBuf();
       }
       if (xhr.readyState === 4) {
+        signal?.removeEventListener("abort", onAbort);
         if (xhr.status === 200) {
           flushBuf();
           resolve();
@@ -79,7 +107,11 @@ export function streamSSE(
       }
     };
 
-    xhr.onerror = () => reject(new Error(`${tag}: network error`));
+    xhr.onerror = () => {
+      if (aborted) return;
+      signal?.removeEventListener("abort", onAbort);
+      reject(new Error(`${tag}: network error`));
+    };
     xhr.send(formData);
   });
 }

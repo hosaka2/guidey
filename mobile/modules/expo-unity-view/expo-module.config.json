@@ -1,0 +1,6 @@
+{
+  "platforms": ["android", "web"],
+  "android": {
+    "modules": ["com.guidey.app.unityview.ExpoUnityViewModule"]
+  }
+}

@@ -18,7 +18,6 @@ __all__ = ["GuideService"]
 
 
 class GuideService:
-
     def build_system_prompt(
         self,
         trigger_word: str,
@@ -28,8 +27,7 @@ class GuideService:
         rag_section = ""
         if rag_results:
             steps_text = "\n".join(
-                f"  ステップ {r.step_number}/{r.total_steps}: {r.text}"
-                for r in rag_results
+                f"  ステップ {r.step_number}/{r.total_steps}: {r.text}" for r in rag_results
             )
             rag_section = f"参考手順:\n{steps_text}"
 
@@ -54,18 +52,14 @@ class GuideService:
 
         next_section = ""
         if next_step:
-            next_section = (
-                f"\n## 次のステップ (Step {next_step.step_number})\n"
-                f"内容: {next_step.text}"
-            )
+            next_section = f"\n## 次のステップ (Step {next_step.step_number})\n内容: {next_step.text}"
 
         return render(
             Prompt.PERIODIC_STAGE1,
             step_number=str(current_step.step_number),
             step_text=current_step.text,
             visual_marker_line=(
-                f"完了の目印: {current_step.visual_marker}"
-                if current_step.visual_marker else ""
+                f"完了の目印: {current_step.visual_marker}" if current_step.visual_marker else ""
             ),
             progress_section=build_progress_section(current_step_index, total_steps),
             next_step_section=next_section,
@@ -125,19 +119,12 @@ class GuideService:
         return render(
             Prompt.STAGE2_ESCALATION,
             escalation_reason_line=(
-                f"エスカレーション理由: {escalation_reason}"
-                if escalation_reason else ""
+                f"エスカレーション理由: {escalation_reason}" if escalation_reason else ""
             ),
             current_step_section=step_section,
-            next_step_line=(
-                build_next_step_line(next_step.step_number, next_step.text)
-                if next_step else ""
-            ),
+            next_step_line=(build_next_step_line(next_step.step_number, next_step.text) if next_step else ""),
             progress_section=build_progress_section(current_step_index, total_steps),
-            user_message_line=(
-                f"\nユーザーの発話: 「{user_message}」"
-                if user_message else ""
-            ),
+            user_message_line=(f"\nユーザーの発話: 「{user_message}」" if user_message else ""),
             observations_section=build_observations_section(recent_observations),
             chat_history_section=build_chat_history_section(chat_history or []),
         )

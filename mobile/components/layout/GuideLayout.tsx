@@ -3,20 +3,20 @@ import { forwardRef } from "react";
 import type { CameraViewHandle } from "@/components/CameraView";
 import { useLayoutVariant } from "@/lib/hooks";
 
+import { PhoneLandscapeLayout } from "./PhoneLandscapeLayout";
 import { PhoneVRLayout } from "./PhoneVRLayout";
 import { SmartGlassesLayout } from "./SmartGlassesLayout";
 
-type Props = React.ComponentProps<typeof PhoneVRLayout>;
+type Props = React.ComponentProps<typeof PhoneLandscapeLayout>;
 
 /**
- * バリアント自動選択レイアウト。設定/デバイス検出 (useLayoutVariant) に応じて
- * PhoneVR / SmartGlasses を切り替える。画面コードは常にこれだけ import すれば良い。
+ * バリアント自動選択レイアウト。
+ * Settings の layoutVariant に応じて 3 種を切替。
  */
 export const GuideLayout = forwardRef<CameraViewHandle, Props>((props, ref) => {
   const variant = useLayoutVariant();
-  if (variant === "smart-glasses") {
-    return <SmartGlassesLayout ref={ref} {...props} />;
-  }
-  return <PhoneVRLayout ref={ref} {...props} />;
+  if (variant === "smart-glasses") return <SmartGlassesLayout ref={ref} {...props} />;
+  if (variant === "phone-vr") return <PhoneVRLayout ref={ref} {...props} />;
+  return <PhoneLandscapeLayout ref={ref} {...props} />;
 });
 GuideLayout.displayName = "GuideLayout";

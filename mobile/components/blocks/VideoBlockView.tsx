@@ -5,7 +5,7 @@ import type { VideoBlock } from "@/lib/types";
 
 export function VideoBlockView({ block }: { block: VideoBlock }) {
   return (
-    <Pressable onPress={() => {/* TODO: open video player */}}>
+    <Pressable onPress={() => {}}>
       <View
         alignSelf="flex-start"
         width={200}

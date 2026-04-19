@@ -18,6 +18,7 @@ class RagResult(BaseModel):
 
 # --- 自律エージェント ---
 
+
 class PlanStep(BaseModel):
     step_number: int
     text: str
@@ -120,5 +121,3 @@ def sanitize_llm_output(
         safe_blocks.append(b)
 
     return message, safe_blocks
-
-

@@ -16,7 +16,13 @@
     "ios": {
       "supportsTablet": true,
       "bundleIdentifier": "com.guidey.app",
+      "requireFullScreen": true,
       "infoPlist": {
+        "UISupportedInterfaceOrientations": [
+          "UIInterfaceOrientationPortrait",
+          "UIInterfaceOrientationLandscapeLeft",
+          "UIInterfaceOrientationLandscapeRight"
+        ],
         "NSSpeechRecognitionUsageDescription": "音声コマンドを認識するために使用します",
         "NSMicrophoneUsageDescription": "ハンズフリー操作のためにマイクを使用します"
       }
@@ -42,12 +48,27 @@
     "plugins": [
       "expo-router",
       [
+        "expo-screen-orientation",
+        {
+          "initialOrientation": "DEFAULT"
+        }
+      ],
+      [
         "expo-speech-recognition",
         {
           "microphonePermission": "ハンズフリー操作のためにマイクを使用します",
           "speechRecognitionPermission": "音声コマンドを認識するために使用します"
         }
-      ]
+      ],
+      "llama.rn",
+      [
+        "react-native-vision-camera",
+        {
+          "cameraPermissionText": "XREAL Eye カメラを使用します",
+          "enableCodeScanner": false
+        }
+      ],
+      "./withUnityAndroid.js"
     ],
     "experiments": {
       "typedRoutes": true

@@ -15,30 +15,32 @@ from fastapi import APIRouter, Depends, File, Form, HTTPException, UploadFile
 from fastapi.responses import StreamingResponse
 
 from src.application.dependencies import (
+    get_analyze_use_case,
     get_chat_use_case,
     get_feedback_use_case,
-    get_analyze_use_case,
     get_periodic_use_case,
     get_plan_generate_use_case,
     get_plan_query_use_case,
     get_session_use_case,
 )
-from src.application.guide.chat_use_case import ChatUseCase
-from src.application.guide.feedback_use_case import FeedbackUseCase
-from src.application.guide.periodic_use_case import PeriodicUseCase
-from src.application.guide.plan_query_use_case import PlanQueryUseCase
-from src.application.guide.plan_use_case import PlanGenerateUseCase
-from src.application.guide.schemas import (
+from src.application.guide.schemas.api import (
     FeedbackRequest,
     FeedbackResponse,
     GuideResponse,
+    PeriodicSyncRequest,
+    PeriodicSyncResponse,
     PlanGenerateRequest,
     PlanResponse,
     SessionStartResponse,
 )
-from src.application.guide.sse_schemas import SchemaExports
-from src.application.guide.session_use_case import SessionUseCase
-from src.application.guide.analyze_use_case import AnalyzeUseCase
+from src.application.guide.schemas.sse_schemas import SchemaExports
+from src.application.guide.usecases.analyze_use_case import AnalyzeUseCase
+from src.application.guide.usecases.chat_use_case import ChatUseCase
+from src.application.guide.usecases.feedback_use_case import FeedbackUseCase
+from src.application.guide.usecases.periodic_use_case import PeriodicUseCase
+from src.application.guide.usecases.plan_query_use_case import PlanQueryUseCase
+from src.application.guide.usecases.plan_use_case import PlanGenerateUseCase
+from src.application.guide.usecases.session_use_case import SessionUseCase
 
 router = APIRouter()
 
@@ -54,7 +56,9 @@ IMAGE_MAX_DIMENSION = 768
 
 def _resize_image(image_bytes: bytes, max_dim: int = IMAGE_MAX_DIMENSION) -> bytes:
     import io
+
     from PIL import Image
+
     img = Image.open(io.BytesIO(image_bytes))
     if max(img.size) <= max_dim:
         return image_bytes
@@ -75,9 +79,11 @@ async def _validate_image(file: UploadFile) -> bytes:
 
 def _sse_stream(event_iter):
     """(event_name, data) AsyncIterator → SSE 文字列 generator。"""
+
     async def gen():
         async for event, data in event_iter:
             yield f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
     return gen()
 
 
@@ -92,15 +98,20 @@ async def generate_plan(
     generate_uc: PlanGenerateUseCase = Depends(get_plan_generate_use_case),
     query_uc: PlanQueryUseCase = Depends(get_plan_query_use_case),
 ):
-    return await query_uc.generate_and_seed(goal=request.goal, generate_uc=generate_uc)
+    return await query_uc.generate_and_inject(
+        goal=request.goal,
+        session_id=request.session_id,
+        generate_uc=generate_uc,
+    )
 
 
 @router.get("/plan/{source_id}", response_model=PlanResponse)
 async def get_plan(
     source_id: str,
+    session_id: str,
     uc: PlanQueryUseCase = Depends(get_plan_query_use_case),
 ):
-    return await uc.get(source_id)
+    return await uc.get(source_id=source_id, session_id=session_id)
 
 
 # ============================================================================
@@ -118,15 +129,36 @@ async def periodic(
 ):
     image_bytes = await _validate_image(file)
     return StreamingResponse(
-        _sse_stream(uc.astream(
-            session_id=session_id,
-            image_bytes=image_bytes,
-            is_calibration=is_calibration.lower() == "true",
-            stage1_result_json=stage1_result,
-        )),
+        _sse_stream(
+            uc.astream(
+                session_id=session_id,
+                image_bytes=image_bytes,
+                is_calibration=is_calibration.lower() == "true",
+                stage1_result_json=stage1_result,
+            )
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@router.post("/periodic/sync", response_model=PeriodicSyncResponse)
+async def periodic_sync(
+    request: PeriodicSyncRequest,
+    uc: PeriodicUseCase = Depends(get_periodic_use_case),
+):
+    """エッジ LLM 経路の state 同期 (画像なし、LLM 呼び出しなし).
+
+    モバイルが on-device で stage1 を回している間、BE の current_step_index /
+    recent_observations が古くなる。10 秒間隔程度でこのエンドポイントを呼んで
+    checkpointer に書き戻す。
+    """
+    result = await uc.sync(
+        session_id=request.session_id,
+        current_step_index=request.current_step_index,
+        new_observations=request.new_observations,
+    )
+    return PeriodicSyncResponse(**result)
 
 
 # ============================================================================
@@ -138,18 +170,20 @@ async def periodic(
 async def chat(
     file: UploadFile | None = File(None),
     user_message: str = Form(...),
-    session_id: str = Form(""),
+    session_id: str = Form(...),
     stage1_result: str = Form(""),
     uc: ChatUseCase = Depends(get_chat_use_case),
 ):
     image_bytes = await _validate_image(file) if file else None
     return StreamingResponse(
-        _sse_stream(uc.astream(
-            session_id=session_id,
-            user_message=user_message,
-            image_bytes=image_bytes,
-            stage1_result_json=stage1_result,
-        )),
+        _sse_stream(
+            uc.astream(
+                session_id=session_id,
+                user_message=user_message,
+                image_bytes=image_bytes,
+                stage1_result_json=stage1_result,
+            )
+        ),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
@@ -180,7 +214,9 @@ async def analyze_stream(
 ):
     image_bytes = await _validate_image(file)
     meta, chunks = await uc.analyze_stream(
-        image_bytes=image_bytes, trigger_word=trigger_word, goal=goal,
+        image_bytes=image_bytes,
+        trigger_word=trigger_word,
+        goal=goal,
     )
 
     async def event_generator():
@@ -191,7 +227,8 @@ async def analyze_stream(
         yield "data: [DONE]\n\n"
 
     return StreamingResponse(
-        event_generator(), media_type="text/event-stream",
+        event_generator(),
+        media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
@@ -203,7 +240,7 @@ async def analyze_stream(
 
 @router.post("/session/start", response_model=SessionStartResponse)
 async def start_session(uc: SessionUseCase = Depends(get_session_use_case)):
-    session_id = await uc.start_explore()
+    session_id = await uc.start()
     return SessionStartResponse(session_id=session_id)
 
 

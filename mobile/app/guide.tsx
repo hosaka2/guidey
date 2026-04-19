@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { StyleSheet } from "react-native";
 import { useLocalSearchParams, useRouter } from "expo-router";
 import * as Speech from "expo-speech";
-import * as ScreenOrientation from "expo-screen-orientation";
 
 import { BottomBar } from "@/components/BottomBar";
 import { CameraViewHandle } from "@/components/CameraView";
@@ -15,7 +14,7 @@ import { ChatInput, useChat } from "@/features/chat";
 import { useFeedback } from "@/features/feedback";
 import { usePlan } from "@/features/plan";
 import { useSpeechRecognition, useVoiceIntents } from "@/features/voice";
-import { useAgentState, useBlockRouter } from "@/lib/hooks";
+import { useAgentState, useBlockRouter, useOrientationLock } from "@/lib/hooks";
 import type { Block, PlanStep } from "@/lib/types";
 
 /**
@@ -28,7 +27,8 @@ import type { Block, PlanStep } from "@/lib/types";
  *   - InstructionCard の表示 + TTS 競合管理 (useAgentState)
  */
 export default function GuideScreen() {
-  const { planId } = useLocalSearchParams<{ planId: string }>();
+  useOrientationLock();
+  const { planId, sessionId } = useLocalSearchParams<{ planId: string; sessionId: string }>();
   const router = useRouter();
   const { apiUrl } = useApiContext();
   const cameraRef = useRef<CameraViewHandle>(null);
@@ -41,16 +41,9 @@ export default function GuideScreen() {
   const [showInput, setShowInput] = useState(false);
   const [inputValue, setInputValue] = useState("");
 
-  // --- 横向きロック ---
-  useEffect(() => {
-    ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.LANDSCAPE);
-    return () => {
-      ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
-    };
-  }, []);
-
-  // --- プラン (session_id は plan.session_id) ---
-  const { plan } = usePlan(planId ?? null);
+  // --- プラン取得 (session_id は goal.tsx で採番済み) ---
+  // 画面の orientation は app/_layout.tsx の Stack.Screen options で宣言 (landscape)
+  const { plan } = usePlan(planId ?? null, sessionId ?? null);
 
   // 初回: 先頭ステップを InstructionCard にセット + お手本画像を blocks に追加
   useEffect(() => {
@@ -124,10 +117,20 @@ export default function GuideScreen() {
     [appendBlocks, speak],
   );
 
+  // 直前の proactive と内容が酷似していたら反復とみなしてスキップ。
+  // 時間ベースのクールダウンは入れない (本当に必要な声かけも止めてしまうため)。
+  const lastProactiveRef = useRef<string>("");
   const handleProactive = useCallback(
     (message: string, blocks: Block[]) => {
-      appendBlocks([{ type: "text", content: message, style: "normal" }, ...blocks]);
-      speak(message, "periodic", "advise");
+      const text = (message ?? "").trim();
+      if (!text) return;
+      if (similarity(lastProactiveRef.current, text) > 0.5) {
+        console.log("[proactive] skipped duplicate:", text.slice(0, 40));
+        return;
+      }
+      lastProactiveRef.current = text;
+      appendBlocks([{ type: "text", content: text, style: "normal" }, ...blocks]);
+      speak(text, "periodic", "advise");
     },
     [appendBlocks, speak],
   );
@@ -211,10 +214,7 @@ export default function GuideScreen() {
         }
         bottomBar={
           <BottomBar
-            onBack={() => {
-              ScreenOrientation.lockAsync(ScreenOrientation.OrientationLock.PORTRAIT_UP);
-              setTimeout(() => router.back(), 200);
-            }}
+            onBack={() => router.back()}
             onTextInput={() => setShowInput(true)}
             voiceEnabled={voiceEnabled}
             onToggleVoice={() => setVoiceEnabled((v) => !v)}
@@ -240,3 +240,19 @@ export default function GuideScreen() {
 const styles = StyleSheet.create({
   root: { flex: 1 },
 });
+
+/** 2-gram Jaccard 類似度。「ほぼ同じ案内を繰り返している」の検出用 (軽量、文字ベース)。 */
+function similarity(a: string, b: string): number {
+  if (a === b) return 1;
+  const grams = (s: string): Set<string> => {
+    const set = new Set<string>();
+    for (let i = 0; i < s.length - 1; i++) set.add(s.slice(i, i + 2));
+    return set;
+  };
+  const A = grams(a);
+  const B = grams(b);
+  if (A.size === 0 || B.size === 0) return 0;
+  let inter = 0;
+  for (const g of A) if (B.has(g)) inter++;
+  return inter / (A.size + B.size - inter);
+}

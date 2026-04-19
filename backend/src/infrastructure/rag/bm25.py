@@ -54,7 +54,7 @@ class BM25Index:
 
         # スコア付きでソート
         scored = sorted(
-            zip(self._results, scores),
+            zip(self._results, scores, strict=False),
             key=lambda x: x[1],
             reverse=True,
         )

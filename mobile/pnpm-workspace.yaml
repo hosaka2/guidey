@@ -1,0 +1,11 @@
+minimumReleaseAge: 20160 # 14 days — supply chain attack mitigation
+
+# ESLint の孫依存で頻繁にマイナーリリースされるため個別除外。
+# ランタイムには含まれない dev-only のツールチェーン。
+minimumReleaseAgeExclude:
+  - "@emnapi/core"
+  - "@emnapi/runtime"
+  - "@emnapi/wasi-threads"
+
+onlyBuiltDependencies:
+  - unrs-resolver

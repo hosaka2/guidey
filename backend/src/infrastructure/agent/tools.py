@@ -9,8 +9,7 @@ LLM には人間可読な content、後続処理には artifact (dict) を渡す
 
 from langchain_core.tools import tool
 
-from src.application.guide.blocks import AlertBlock, ImageBlock, TextBlock, TimerBlock, VideoBlock
-
+from src.application.guide.schemas.blocks import AlertBlock, ImageBlock, TextBlock, TimerBlock, VideoBlock
 
 # === 共通ツール (コンテキスト不要) ===
 
@@ -120,7 +119,9 @@ def build_hq_tools(
             results = []
             for collection in ["diy", "cooking"]:
                 hits = rag_client.search(
-                    collection=collection, query_embedding=embedding, top_k=top_k,
+                    collection=collection,
+                    query_embedding=embedding,
+                    top_k=top_k,
                 )
                 results.extend(hits)
             if not results:

@@ -1,180 +1,221 @@
 # Guidey
 
-**ハンズフリーAI作業ガイド** — カメラ越しに作業を見守り、音声で自律的にナビゲーションするエージェント。
+**ハンズフリー AI 作業ガイド** — カメラ越しに作業を見守り、音声で自律的にナビゲーションするエージェント。
 
-料理やDIYの作業中、スマホを手に持たなくても、AIがカメラで状況を判断し、「次はこうして」「火が強すぎます」と声で教えてくれる。
+料理や DIY の作業中、スマホを手に持たなくても、AI がカメラで状況を判断し、
+「次はこうして」「火が強すぎます」と声で教えてくれる。
 
 ---
 
 ## Tech Stack
 
 | Layer | Technology |
-|-------|-----------|
-| **Mobile** | React Native / Expo / TypeScript / Tamagui |
-| **Backend** | FastAPI / Python 3.12 / DDD |
-| **LLM** | Gemma 4 (Ollama, ローカル) / Claude Sonnet (API, エスカレーション) |
-| **Agent** | LangGraph State Machine / 統一2段階パイプライン |
-| **RAG** | Milvus Lite + BM25 ハイブリッド検索 / YouTube自動取り込み |
-| **Session** | Valkey (Redis互換) / TTL 30分自動揮発 |
-| **Observability** | OpenTelemetry (Traces + Metrics) / LangSmith |
+|---|---|
+| **Mobile** | React Native / Expo / TypeScript / Tamagui v2 / Feature-sliced |
+| **Backend** | FastAPI / Python 3.12 / 軽量 DDD |
+| **Agent** | **LangGraph 単一 StateGraph** + **Structured Output** + `create_react_agent` |
+| **State** | **AsyncRedisSaver** (langgraph-checkpoint-redis) / Redis 8+ / TTL 30 分 |
+| **LLM** | Gemma 4 (Ollama, ローカル) / Claude Sonnet (API, エスカレーション時) |
+| **RAG** | Milvus Lite + BM25 ハイブリッド / YouTube 自動取り込み |
+| **Codegen** | OpenAPI → `openapi-typescript` でモバイル TS 型を自動生成 |
 | **Voice** | expo-speech-recognition (STT) / expo-speech (TTS) |
+| **Observability** | OpenTelemetry (Traces + Metrics) / LangSmith |
+| **Lint/Format/Type** | ruff / pyright / expo lint / tsc |
 
 ---
 
 ## 自律エージェント
 
-ユーザーが何も操作しなくても、AIが自律的に判断して声をかける。
+LangGraph の単一 StateGraph で定期監視 / ユーザー対話 / キャリブレーションを
+宣言的に記述。`/periodic` と `/chat` は同じグラフを pipeline_type だけ切替えて呼ぶ。
 
-```
-Camera (3秒間隔, 適応的)
-  ↓
-┌──────────────────────────────────────────┐
-│  統一2段階パイプライン                       │
-│                                          │
-│  Stage 1: Gemma (fast, ~1s)              │
-│    ├─ 定期判定: continue / next / anomaly │
-│    └─ ユーザー対話: 即応答 + ツール実行     │
-│           ↓                              │
-│  can_handle?                             │
-│    ├─ Yes (95%) → 結果を返す              │
-│    └─ No  (5%)  → Stage 2へ              │
-│                                          │
-│  Stage 2: HQ / Claude (deep, ~3-5s)     │
-│    RAG検索 + ツール実行 + プラン修正       │
-└──────────────────────────────────────────┘
-  ↓
-Safety Check → Act → TTS読み上げ
+```mermaid
+graph TD;
+    __start__([__start__])
+    stage1(stage1)
+    seed_stage1(seed_stage1)
+    stage2(stage2)
+    safety(safety)
+    calibrate(calibrate)
+    __end__([__end__])
+    __start__ -.-> calibrate
+    __start__ -.-> seed_stage1
+    __start__ -.-> stage1
+    seed_stage1 -.-> safety
+    seed_stage1 -.-> stage2
+    stage1 -.-> safety
+    stage1 -.-> stage2
+    stage2 --> safety
+    calibrate --> __end__
+    safety --> __end__
 ```
 
-**定期判定** (periodic) と**ユーザー対話** (user_action) が同じパイプラインを共有。入口だけ違う。
+- **stage1**: 高速判定 (Gemma, Structured Output)。
+- **stage2**: エスカレーション時のみ `create_react_agent` + ツール利用 (Claude)。
+- **safety**: 危険キーワード / 滞在時間 / 低確信度ガード + メモリ更新 + 最終 SSE 配信。
+- **seed_stage1**: **将来のエッジ LLM 対応**。モバイルが事前計算した Stage1Output を持ち込める分岐。
+- **calibrate**: 初期位置推定 (1-shot)。
+
+Graph はすべて **`AsyncRedisSaver` で自動永続化** (thread_id = session_id、TTL 30 分、
+refresh_on_read で延命)。画像 bytes は `config.configurable` 経由なので Redis に
+焼き付かない。
+
+詳細 → [docs/agent-architecture.md](docs/agent-architecture.md)
 
 ### ハーネス (安全装置)
 
-LLMを信頼しすぎない。7層の安全装置で暴走を防ぐ。
+LLM を信頼しすぎない多層ガード:
 
 | Layer | 機能 |
-|-------|------|
-| 入力ガード | 画像10MB制限、形式チェック、768pxリサイズ |
-| コスト上限 | Stage2 呼び出し上限 / セッション |
-| タイムアウト | periodic 10s / user_action 20s |
-| 出力サニタイズ | メッセージ長制限、injection対策、URL検証 |
-| 安全チェック | 危険キーワード検知、低確信度ブロック、最低滞在時間ガード |
-| Mobile | 適応的サンプリング (3s→10s→20s)、Stuck検知、TTS競合管理 |
+|---|---|
+| 入力ガード | 画像 10MB / JPEG,PNG,WebP / 768px リサイズ |
+| コスト上限 | `session_max_stage2_calls=30` / `max_total_calls=500` / セッション |
+| タイムアウト | periodic 30s / user_action 60s (`asyncio.timeout`) |
+| Structured Output | Pydantic スキーマ検証で不正 JSON を排除 |
+| 出力サニタイズ | message 500 文字 / blocks 5 個 / injection 対策 / URL 検証 |
+| Safety ノード | 危険キーワード / 最低滞在時間 / 低確信度 anomaly ダウングレード |
+| Mobile | 適応的サンプリング (3→10→20 秒) / Stuck 検知 / Lock / TTS 競合管理 |
 
-**設計原則: 安全なデフォルト** — タイムアウト/コスト超過/低確信度のどの場合も `continue` (現状維持) を返す。
-
-### プロンプト管理
-
-バージョン付きmdファイルで一元管理。コード変更なしでプロンプトを改善できる。
-
-```
-src/domain/guide/prompts/
-  periodic_stage1/v1.md     ← 定期判定
-  user_action_stage1/v1.md  ← ユーザー対話
-  stage2_escalation/v1.md   ← エスカレーション
-  plan_generation/v1.md     ← プラン自動生成
-  ...
-```
+**設計原則**: タイムアウト / コスト超過 / 低確信度は全て `continue` (現状維持) にフォールバック。
 
 ---
 
-## アーキテクチャ
+## SSE プロトコル
+
+`/periodic` と `/chat` は共通の SSE プロトコル:
 
 ```
-┌─ Mobile (Expo) ─────────────────────────────────────┐
-│  CameraView → useAutonomousLoop (3s adaptive)       │
-│  useSpeechRecognition (14 VoiceIntents)             │
-│  useAgentState (Lock + TTS競合管理)                  │
-│  session_id + image/message だけ送信                 │
-└──────────────────────┬──────────────────────────────┘
-                       │ REST API (session_id ベース)
-┌─ Backend (FastAPI) ──┴──────────────────────────────┐
-│  routes/guide_router.py                             │
-│    /plan/* → session 作成 + session_id 返却          │
-│    /judge  → session からコンテキスト取得 → Pipeline   │
-│    /chat   → session から履歴取得 → Pipeline          │
-│                                                     │
-│  infrastructure/                                    │
-│    session/store.py  ← Valkey セッション管理          │
-│    agent/pipeline.py ← 統一2段階パイプライン           │
-│    agent/graph.py    ← LangGraph State Machine       │
-│    agent/tools.py    ← LangChain @tool               │
-│                                                     │
-│  domain/guide/                                      │
-│    model.py     ← ドメインモデル + 安全ルール          │
-│    service.py   ← プロンプト構築                      │
-│    prompts/     ← バージョン付きmdファイル             │
-│                                                     │
-│  common/                                            │
-│    telemetry.py ← OpenTelemetry                     │
-│    metrics.py   ← パイプラインメトリクス               │
-└─────────────────────────────────────────────────────┘
+event: stage  data: {"stage":1,"escalated":true,"message":"少し調べますね",...}
+event: stage  data: {"stage":2,"judgment":"next","message":"...","blocks":[...]}
+event: done   data: {"current_step_index":2}
 ```
 
-### ディレクトリ構造
+Stage1 の escalate 中間通知で UX を埋め、最終判定は safety ノード完了時に emit。
+
+---
+
+## ディレクトリ構造
 
 ```
 guidey/
+├── Makefile                     make help で全コマンド一覧
 ├── backend/
-│   ├── src/
-│   │   ├── main.py
-│   │   ├── config.py
-│   │   ├── common/            # telemetry, metrics, json_utils
-│   │   ├── domain/guide/      # モデル, サービス, prompts/
-│   │   ├── application/guide/ # UseCase, UIブロック, スキーマ
-│   │   ├── infrastructure/
-│   │   │   ├── agent/         # pipeline, graph, tools
-│   │   │   ├── llm/           # Ollama / Claude クライアント
-│   │   │   ├── rag/           # Milvus + BM25 + embeddings
-│   │   │   └── repositories/  # SQLite, ファイルシステム
-│   │   └── routes/
-│   └── scripts/               # ingest_pipeline.py 等
+│   └── src/
+│       ├── main.py              FastAPI app + lifespan (Redis checkpointer 初期化)
+│       ├── routes/              HTTP 受け口 (薄い: 検証 + SSE ラップ)
+│       ├── application/guide/   UseCase (orchestration)
+│       │   ├── periodic/chat/session/plan_query/plan/analyze/feedback UseCase
+│       │   ├── outputs.py       Stage1/Stage2/CalibrationOutput (Pydantic)
+│       │   ├── sse_schemas.py   StageEvent (OpenAPI 露出用)
+│       │   └── blocks.py        UI ブロック型
+│       ├── domain/guide/        ドメインモデル + プロンプト (md)
+│       ├── infrastructure/
+│       │   ├── agent/
+│       │   │   ├── graph.py     GuideGraph (StateGraph 本体)
+│       │   │   ├── agent.py     AgentClient (Graph の唯一の入口)
+│       │   │   └── tools.py     @tool (content_and_artifact)
+│       │   ├── llm/             Ollama / Claude クライアント
+│       │   └── rag/             Milvus + BM25 + embeddings
+│       └── common/              telemetry / metrics / exceptions
 │
 ├── mobile/
-│   ├── app/                   # guide.tsx, goal.tsx, settings.tsx
-│   ├── hooks/                 # useAutonomousLoop, useAgentState, useSpeechRecognition
-│   ├── components/            # BlockRenderer, blocks/, FeedbackButtons
-│   └── types/                 # Plan, Block
+│   ├── app/                     Expo Router (薄い画面: ~120-245 行)
+│   ├── features/                機能モジュール (Feature-sliced)
+│   │   ├── autonomous/          useAutonomousLoop (edge-llm 差し込み口あり)
+│   │   ├── chat/                useChat + ChatInput
+│   │   ├── voice/               useSpeechRecognition + useVoiceIntents
+│   │   ├── feedback/ plan/
+│   ├── components/
+│   │   ├── ui/                  デザインシステム (Tamagui ラップ)
+│   │   ├── layout/              PhoneVRLayout / SmartGlassesLayout (自動切替)
+│   │   └── blocks/              ブロック描画 (Text/Image/Video/Timer/Alert)
+│   └── lib/
+│       ├── api/                 HTTP + SSE (schema.ts は OpenAPI 自動生成)
+│       ├── edge-llm/            Stage1Runner interface (cloud / gemma-local / apple-foundation)
+│       ├── theme/               tokens + 2 variants
+│       ├── hooks/               useAgentState / useBlockRouter / useLayoutVariant
+│       └── types/               Block / Plan / StageEvent (schema.ts から再 export)
 │
-├── docs/                      # 詳細ドキュメント
-└── .env.example
+└── docs/
+    ├── agent-architecture.md    エージェント全容 (Mermaid 図付き)
+    ├── api-architecture.md      Backend レイヤー構成・依存注入
+    ├── mobile-architecture.md   モバイル構造・状態遷移 (5 フロー詳述)
+    ├── rag-architecture.md      RAG パイプライン
+    └── future-design.md         未実装の将来設計
 ```
 
 ---
 
 ## セットアップ
 
+### 必須ランタイム
+
 ```bash
-cp .env.example .env
+# Redis 8 (RedisJSON/RediSearch 必須、Valkey 不可)
+docker run -d --name redis-stack --restart unless-stopped \
+  -p 6379:6379 redis/redis-stack-server:latest
 
-# Ollama
+# Ollama (LLM 実行)
 brew install ollama && brew services start ollama
-ollama pull gemma4:e2b
+ollama pull gemma4:e4b
 ollama pull nomic-embed-text
-
-# Valkey (セッション管理)
-brew install valkey && brew services start valkey
-
-# Backend
-cd backend && uv sync
-uv run uvicorn src.main:app --host 0.0.0.0 --port 8000
-
-# Mobile
-cd mobile && npm install
-npx expo start
 ```
 
-Development Build (実機テスト・音声認識) の詳細は [mobile-architecture.md](docs/mobile-architecture.md) を参照。
+### 依存インストール
+
+```bash
+cp backend/.env.example backend/.env   # 必要なら編集
+make install                           # uv sync + npm install
+```
+
+### 開発
+
+```bash
+make dev           # Redis up + BE 起動 (0.0.0.0:8000)
+make dev-mobile    # 別ターミナルで Expo 起動
+```
+
+### OpenAPI から TS 型生成
+
+```bash
+# BE 起動中に
+make gen-api       # → mobile/lib/api/schema.ts が更新
+```
+
+### Lint / Format / Typecheck
+
+```bash
+make lint          # ruff check + expo lint
+make format        # ruff format/--fix + expo lint --fix
+make typecheck     # pyright + tsc --noEmit
+make check         # lint + typecheck (CI 用)
+```
+
+### コマンド一覧
+
+```bash
+make help
+```
 
 ---
 
 ## ドキュメント
 
 | ドキュメント | 内容 |
-|------------|------|
-| [agent-architecture.md](docs/agent-architecture.md) | 自律エージェント、LangGraph、2段階パイプライン、ハーネス |
-| [rag-architecture.md](docs/rag-architecture.md) | RAGパイプライン、YouTube取り込み、ハイブリッド検索 |
-| [llm-strategy.md](docs/llm-strategy.md) | モデル使い分け、コスト戦略、プロバイダー切り替え |
-| [mobile-architecture.md](docs/mobile-architecture.md) | 画面構成、hooks、音声認識、UIブロック |
-| [api-architecture.md](docs/api-architecture.md) | Backend アーキテクチャ、レイヤー構成、リクエストフロー |
-| [future-design.md](docs/future-design.md) | 未実装の将来設計 |
+|---|---|
+| [docs/agent-architecture.md](docs/agent-architecture.md) | LangGraph / Structured Output / Checkpointer / エッジ stage1 準備 / Mermaid 図 |
+| [docs/api-architecture.md](docs/api-architecture.md) | レイヤー構成 / UseCase / SSE / DI / 設定 |
+| [docs/mobile-architecture.md](docs/mobile-architecture.md) | Feature-sliced / 状態遷移 5 フロー / 排他制御 3 層 |
+| [docs/rag-architecture.md](docs/rag-architecture.md) | RAG パイプライン / YouTube 取り込み |
+| [docs/future-design.md](docs/future-design.md) | 未実装の将来設計 |
+
+---
+
+## 将来の拡張点 (interface だけ準備済み)
+
+- **エッジ LLM Stage1** (`mobile/lib/edge-llm/`): `gemma-local` / `apple-foundation` のスタブ。
+  実装時は `useAutonomousLoop({ edgeMode: "gemma-local" })` 1 行で切り替え、
+  BE の `seed_stage1` ノードが受け取る。
+- **スマートグラス レイアウト** (`mobile/components/layout/SmartGlassesLayout.tsx`):
+  HUD 風の骨格のみ実装済。`useLayoutVariant()` で動的切替。
+- **Prompt Caching**: Claude 経路は `cache_control: ephemeral` 有効。Ollama は未対応。
