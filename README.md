@@ -151,7 +151,7 @@ guidey/
 ### 必須ランタイム
 
 ```bash
-# Redis 8 (RedisJSON/RediSearch 必須、Valkey 不可)
+# Redis 8 (RedisJSON/RediSearch 必須)
 docker run -d --name redis-stack --restart unless-stopped \
   -p 6379:6379 redis/redis-stack-server:latest
 
@@ -209,13 +209,3 @@ make help
 | [docs/rag-architecture.md](docs/rag-architecture.md) | RAG パイプライン / YouTube 取り込み |
 | [docs/future-design.md](docs/future-design.md) | 未実装の将来設計 |
 
----
-
-## 将来の拡張点 (interface だけ準備済み)
-
-- **エッジ LLM Stage1** (`mobile/lib/edge-llm/`): `gemma-local` / `apple-foundation` のスタブ。
-  実装時は `useAutonomousLoop({ edgeMode: "gemma-local" })` 1 行で切り替え、
-  BE の `seed_stage1` ノードが受け取る。
-- **スマートグラス レイアウト** (`mobile/components/layout/SmartGlassesLayout.tsx`):
-  HUD 風の骨格のみ実装済。`useLayoutVariant()` で動的切替。
-- **Prompt Caching**: Claude 経路は `cache_control: ephemeral` 有効。Ollama は未対応。

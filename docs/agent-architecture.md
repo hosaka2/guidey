@@ -539,7 +539,7 @@ graph = build_guide_graph(..., checkpointer=checkpointer)
 
 | 判断 | 理由 |
 |---|---|
-| **Redis 8** を必須化 | `langgraph-checkpoint-redis` が RedisJSON/RediSearch を要求。Valkey 不可 (モジュール非内蔵) |
+| **Redis 8** を必須化 | `langgraph-checkpoint-redis` が RedisJSON/RediSearch を要求 |
 | Session dataclass 廃止 | Graph state に集約。手動 JSON serialize/deserialize が消える |
 | per-call を config 経由 | image_bytes が checkpoint に残らない (プライバシー & サイズ) |
 | safety ノードで memory 更新 | 副作用を 1 箇所に集約、トランザクション的に確実 |
