@@ -12,7 +12,12 @@ export type EdgeStep = {
   visual_marker: string;
 };
 
+/** どの pipeline の Stage1 を回すか。BE の prompt_loader のキーと対応。 */
+export type EdgePipeline = "periodic" | "user_action";
+
 export type Stage1Input = {
+  /** periodic | user_action。プロンプト切替に使う (デフォルト periodic)。 */
+  pipeline?: EdgePipeline;
   /** 現在のステップ (必須)。 */
   currentStep: EdgeStep;
   /** 次のステップ (任意、最終ステップなら null)。 */
@@ -21,6 +26,8 @@ export type Stage1Input = {
   observations: string[];
   /** カメラ画像の file:// URI (VLM に渡す)。 */
   imageUri: string;
+  /** user_action のときのユーザー発話。periodic では空でよい。 */
+  userMessage?: string;
 };
 
 /** BE の Stage1Output と完全一致 (自動生成)。 */
@@ -39,42 +46,5 @@ export interface Stage1Runner {
 
 export type EdgeMode = "cloud" | "gemma-local";
 
-/** エッジ専用の短縮プロンプトを組み立てる (全ランナー共通)。
- *
- * `imageContext` が入るのは、画像を直接扱えない runner (Apple) が Vision framework で
- * 抽出したキャプション/OCR 結果をここに挿す想定。VLM 直接入力できる runner (Gemma) は空で良い。
- */
-export function buildEdgePrompt(
-  input: Stage1Input,
-  options: { imageContext?: string } = {},
-): string {
-  const obs = input.observations.length
-    ? input.observations.map((o, i) => `${i + 1}. ${o}`).join("\n")
-    : "(なし)";
-  const next = input.nextStep
-    ? `次: ${input.nextStep.step_number}. ${input.nextStep.text}`
-    : "次: (最終ステップ)";
-  const imgBlock = options.imageContext
-    ? ["画像から読み取った情報:", options.imageContext, ""]
-    : [];
-  return [
-    "あなたは作業アシスタント。画像と直近の状況から判定する。",
-    "",
-    `現在のステップ ${input.currentStep.step_number}: ${input.currentStep.text}`,
-    `目印: ${input.currentStep.visual_marker}`,
-    next,
-    "",
-    ...imgBlock,
-    "直近の状況:",
-    obs,
-    "",
-    "判定ルール:",
-    "- continue: 進行中、変化なし",
-    "- next: 現在のステップが完了",
-    "- anomaly: 異常 (危険、手順逸脱)",
-    "自信がない / 深い判断が要るなら can_handle=false にしてエスカレーションする。",
-    "",
-    '必ず以下の JSON のみで返答する (他のテキスト禁止):',
-    '{"judgment":"continue|next|anomaly","confidence":0.0,"message":"","can_handle":true,"escalation_reason":""}',
-  ].join("\n");
-}
+// エッジプロンプトは ./prompts/ 配下に version 管理つきで分離。
+// 公開 API は ./index.ts 経由 (`import { buildEdgePrompt } from "@/lib/edge-llm"`)。

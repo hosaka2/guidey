@@ -6,6 +6,8 @@ minimumReleaseAgeExclude:
   - "@emnapi/core"
   - "@emnapi/runtime"
   - "@emnapi/wasi-threads"
+  # llama.rn 0.12.x (Gemma 4 / 新 VLM 対応を追うため一時除外)
+  - "llama.rn"
 
 onlyBuiltDependencies:
   - unrs-resolver

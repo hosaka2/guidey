@@ -1,9 +1,15 @@
-import { Alert, Platform, StyleSheet, ScrollView } from "react-native";
-import { useRouter } from "expo-router";
+import { useCallback, useEffect, useState } from "react";
+import { Alert, Platform, ScrollView, StyleSheet } from "react-native";
 
 import { Pressable, Text, View } from "@/components/ui";
 import { type CameraSource, useApiContext } from "@/contexts/ApiContext";
 import type { EdgeMode } from "@/lib/edge-llm";
+import {
+  deleteModel,
+  type DownloadProgress,
+  downloadModel,
+  isModelReady,
+} from "@/lib/edge-llm/model-manager";
 import type { ThemeVariant } from "@/lib/theme";
 
 const IS_ANDROID = Platform.OS === "android";
@@ -19,11 +25,11 @@ function warnXrealNotSupported(onCancel?: () => void) {
 
 const EDGE_MODES: { value: EdgeMode; label: string; hint: string }[] = [
   { value: "cloud", label: "クラウド", hint: "BE で Stage1 を実行 (既定)" },
-  { value: "gemma-local", label: "Gemma 4 E2B (VLM)", hint: "オンデバイス llama.rn, 画像入力対応" },
+  { value: "gemma-local", label: "Gemma 4 E2B (VLM)", hint: "オンデバイス llama.rn, 画像入力対応 (約 1.9GB)" },
 ];
 
 const LAYOUTS: { value: ThemeVariant; label: string; hint: string }[] = [
-  { value: "phone-landscape", label: "スマホ横持ち", hint: "手持ち用 3 カラム (既定)" },
+  { value: "phone-landscape", label: "スマホ", hint: "スマホ手持ち用" },
   { value: "phone-vr", label: "VR ゴーグル", hint: "Cardboard 系、両目ステレオ分割" },
   { value: "smart-glasses", label: "スマートグラス", hint: "Xreal / Rokid、HUD (透過、カメラ非表示)" },
 ];
@@ -33,23 +39,124 @@ const CAMERAS: { value: CameraSource; label: string; hint: string }[] = [
   { value: "xreal-eye", label: "XREAL Eye", hint: "Beam Pro + XREAL SDK (Android 専用)" },
 ];
 
+type ModelStatus =
+  | { kind: "unknown" }
+  | { kind: "missing" }
+  | { kind: "ready" }
+  | { kind: "downloading"; progress: DownloadProgress }
+  | { kind: "error"; message: string };
+
+function useEdgeModelStatus() {
+  const [status, setStatus] = useState<ModelStatus>({ kind: "unknown" });
+
+  const refresh = useCallback(async () => {
+    const ready = await isModelReady();
+    setStatus({ kind: ready ? "ready" : "missing" });
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  const download = useCallback(async () => {
+    setStatus({
+      kind: "downloading",
+      progress: { asset: "main", totalBytes: 0, writtenBytes: 0, percent: 0 },
+    });
+    try {
+      await downloadModel((p) => setStatus({ kind: "downloading", progress: p }));
+      setStatus({ kind: "ready" });
+    } catch (e) {
+      setStatus({ kind: "error", message: e instanceof Error ? e.message : String(e) });
+    }
+  }, []);
+
+  const remove = useCallback(async () => {
+    try {
+      await deleteModel();
+      setStatus({ kind: "missing" });
+    } catch (e) {
+      setStatus({ kind: "error", message: e instanceof Error ? e.message : String(e) });
+    }
+  }, []);
+
+  return { status, download, remove, refresh };
+}
+
+function EdgeModelControls() {
+  const { status, download, remove } = useEdgeModelStatus();
+
+  const confirmDelete = () =>
+    Alert.alert("モデルを削除", "ダウンロード済みの Gemma モデル (約 1.9GB) を削除します。", [
+      { text: "キャンセル", style: "cancel" },
+      { text: "削除", style: "destructive", onPress: remove },
+    ]);
+
+  return (
+    <View style={styles.subCard}>
+      {status.kind === "unknown" && <Text fontSize="$2" opacity={0.6}>状態確認中...</Text>}
+
+      {status.kind === "missing" && (
+        <>
+          <Text fontSize="$2" opacity={0.7}>未ダウンロード</Text>
+          <Pressable
+            onPress={download}
+            style={({ pressed }) => [styles.actionButton, pressed && { opacity: 0.85 }]}
+          >
+            <Text color="#fff" fontWeight="700">ダウンロード (約 1.9GB)</Text>
+          </Pressable>
+        </>
+      )}
+
+      {status.kind === "ready" && (
+        <>
+          <Text fontSize="$2" opacity={0.7}>✓ ダウンロード済み</Text>
+          <Pressable
+            onPress={confirmDelete}
+            style={({ pressed }) => [styles.actionButtonDanger, pressed && { opacity: 0.85 }]}
+          >
+            <Text color="#fff" fontWeight="700">削除</Text>
+          </Pressable>
+        </>
+      )}
+
+      {status.kind === "downloading" && (
+        <>
+          <Text fontSize="$2" opacity={0.7}>
+            ダウンロード中: {status.progress.asset} {status.progress.percent.toFixed(0)}%
+          </Text>
+          <View style={styles.progressBarTrack}>
+            <View
+              style={[
+                styles.progressBarFill,
+                { width: `${Math.min(100, status.progress.percent)}%` },
+              ]}
+            />
+          </View>
+        </>
+      )}
+
+      {status.kind === "error" && (
+        <>
+          <Text fontSize="$2" color="#d00">エラー: {status.message}</Text>
+          <Pressable
+            onPress={download}
+            style={({ pressed }) => [styles.actionButton, pressed && { opacity: 0.85 }]}
+          >
+            <Text color="#fff" fontWeight="700">リトライ</Text>
+          </Pressable>
+        </>
+      )}
+    </View>
+  );
+}
+
 export default function SettingsScreen() {
-  const router = useRouter();
   const {
     edgeMode, setEdgeMode,
     layoutVariant, setLayoutVariant,
     cameraSource, setCameraSource,
   } = useApiContext();
-
-  // XREAL プリセット: レイアウト = smart-glasses, カメラ = xreal-eye
-  const applyXrealPreset = () => {
-    if (!IS_ANDROID) {
-      warnXrealNotSupported();
-      return;
-    }
-    setLayoutVariant("smart-glasses");
-    setCameraSource("xreal-eye");
-  };
 
   const handleCameraSelect = (value: CameraSource) => {
     if (value === "xreal-eye" && !IS_ANDROID) {
@@ -61,28 +168,8 @@ export default function SettingsScreen() {
 
   return (
     <ScrollView style={styles.scroll} contentContainerStyle={styles.content}>
-      {/* === プリセット === */}
-      <View gap="$2">
-        <Text fontSize="$5" fontWeight="600" color="$color">プリセット</Text>
-        <Pressable
-          onPress={applyXrealPreset}
-          style={({ pressed }) => [
-            styles.preset,
-            !IS_ANDROID && styles.cardDisabled,
-            pressed && { opacity: 0.85 },
-          ]}
-        >
-          <Text color="#fff" fontWeight="700" fontSize="$4">
-            XREAL 1S + Eye{!IS_ANDROID ? " (Android 専用)" : ""}
-          </Text>
-          <Text color="#fff" fontSize="$2" opacity={0.85}>
-            レイアウト: スマートグラス / カメラ: XREAL Eye
-          </Text>
-        </Pressable>
-      </View>
-
       {/* === エッジ LLM === */}
-      <View gap="$2" marginTop="$4">
+      <View gap="$2">
         <Text fontSize="$5" fontWeight="600" color="$color">エッジ LLM</Text>
         <Text fontSize="$2" color="$color" opacity={0.5}>
           Stage1 (高速判定) をどこで実行するかを選択。クラウド以外は
@@ -91,20 +178,22 @@ export default function SettingsScreen() {
         {EDGE_MODES.map((m) => {
           const selected = edgeMode === m.value;
           return (
-            <Pressable
-              key={m.value}
-              onPress={() => setEdgeMode(m.value)}
-              style={({ pressed }) => [
-                styles.card, selected && styles.cardActive, pressed && { opacity: 0.85 },
-              ]}
-            >
-              <Text fontSize="$4" fontWeight="700" color={selected ? "#fff" : "$color"}>
-                {m.label}
-              </Text>
-              <Text fontSize="$2" color={selected ? "#fff" : "$color"} opacity={selected ? 0.9 : 0.6}>
-                {m.hint}
-              </Text>
-            </Pressable>
+            <View key={m.value} gap="$1">
+              <Pressable
+                onPress={() => setEdgeMode(m.value)}
+                style={({ pressed }) => [
+                  styles.card, selected && styles.cardActive, pressed && { opacity: 0.85 },
+                ]}
+              >
+                <Text fontSize="$4" fontWeight="700" color={selected ? "#fff" : "$color"}>
+                  {m.label}
+                </Text>
+                <Text fontSize="$2" color={selected ? "#fff" : "$color"} opacity={selected ? 0.9 : 0.6}>
+                  {m.hint}
+                </Text>
+              </Pressable>
+              {m.value === "gemma-local" && <EdgeModelControls />}
+            </View>
           );
         })}
       </View>
@@ -169,19 +258,6 @@ export default function SettingsScreen() {
         })}
       </View>
 
-      {/* === デバッグ: カメラ調査 === */}
-      <View gap="$2" marginTop="$4">
-        <Text fontSize="$5" fontWeight="600" color="$color">デバッグ</Text>
-        <Pressable
-          onPress={() => router.push("/camera-probe" as never)}
-          style={({ pressed }) => [styles.card, pressed && { opacity: 0.85 }]}
-        >
-          <Text fontSize="$4" fontWeight="700">カメラ調査 (全カメラ列挙)</Text>
-          <Text fontSize="$2" opacity={0.6}>
-            Beam Pro の全カメラを列挙して、XREAL Eye がどの id か特定する
-          </Text>
-        </Pressable>
-      </View>
     </ScrollView>
   );
 }
@@ -189,12 +265,6 @@ export default function SettingsScreen() {
 const styles = StyleSheet.create({
   scroll: { flex: 1, backgroundColor: "#fff" },
   content: { padding: 16, gap: 16, paddingBottom: 40 },
-  preset: {
-    backgroundColor: "#6B46C1",
-    borderRadius: 12,
-    padding: 14,
-    gap: 4,
-  },
   card: {
     borderWidth: 1, borderColor: "#ddd", borderRadius: 12,
     padding: 12, backgroundColor: "#fff", gap: 4,
@@ -204,5 +274,36 @@ const styles = StyleSheet.create({
   },
   cardDisabled: {
     opacity: 0.5,
+  },
+  subCard: {
+    marginLeft: 12,
+    padding: 10,
+    borderRadius: 10,
+    backgroundColor: "#f6f6f8",
+    gap: 8,
+  },
+  actionButton: {
+    backgroundColor: "#2F95DC",
+    borderRadius: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    alignSelf: "flex-start",
+  },
+  actionButtonDanger: {
+    backgroundColor: "#d0021b",
+    borderRadius: 8,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    alignSelf: "flex-start",
+  },
+  progressBarTrack: {
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: "#e0e0e0",
+    overflow: "hidden",
+  },
+  progressBarFill: {
+    height: "100%",
+    backgroundColor: "#2F95DC",
   },
 });

@@ -1,4 +1,5 @@
-import { buildEdgePrompt, type Stage1Input, type Stage1Output, type Stage1Runner } from "./types";
+import { buildEdgePrompt } from "./prompts";
+import type { Stage1Input, Stage1Output, Stage1Runner } from "./types";
 import { downloadModel, isModelReady, modelPaths } from "./model-manager";
 
 /**
@@ -20,6 +21,12 @@ type CompletionOpts = {
 type LlamaContext = {
   completion: (opts: CompletionOpts) => Promise<{ text: string }>;
   release: () => Promise<void>;
+  // llama.rn 0.12+ は initLlama の mmproj を受け付けず、別途 initMultimodal を呼ぶ必要がある。
+  initMultimodal?: (opts: {
+    path: string;
+    use_gpu?: boolean;
+    image_max_tokens?: number;
+  }) => Promise<boolean>;
 };
 
 type LlamaRn = {
@@ -28,6 +35,8 @@ type LlamaRn = {
     mmproj?: string;
     n_ctx: number;
     n_gpu_layers?: number;
+    /** llama.rn 0.12+: Metal を完全に無効化 (iOS での Metal 不具合回避)。 */
+    no_gpu_devices?: boolean;
   }) => Promise<LlamaContext>;
 };
 
@@ -73,13 +82,38 @@ export class GemmaLocalRunner implements Stage1Runner {
       const paths = modelPaths();
       console.log("[edge/gemma] loading context:", paths);
       const t0 = Date.now();
-      this.ctx = await llama.initLlama({
-        model: stripFilePrefix(paths.main),
-        mmproj: stripFilePrefix(paths.mmproj),
-        n_ctx: 2048,
-        n_gpu_layers: 99,
-      });
-      console.log(`[edge/gemma] context ready in ${Date.now() - t0}ms`);
+      // llama.rn 0.12+ は mmproj を initLlama ではなく initMultimodal で指定する。
+      try {
+        this.ctx = await llama.initLlama({
+          model: stripFilePrefix(paths.main),
+          n_ctx: 2048,
+          n_gpu_layers: 99,
+        });
+        console.log(`[edge/gemma] context ready in ${Date.now() - t0}ms (GPU)`);
+      } catch (e) {
+        console.warn("[edge/gemma] GPU init failed, retry with CPU:", e);
+        this.ctx = await llama.initLlama({
+          model: stripFilePrefix(paths.main),
+          n_ctx: 2048,
+          n_gpu_layers: 0,
+          no_gpu_devices: true,
+        });
+        console.log(`[edge/gemma] context ready in ${Date.now() - t0}ms (CPU)`);
+      }
+
+      // Multimodal (vision) 有効化
+      if (this.ctx.initMultimodal) {
+        try {
+          const ok = await this.ctx.initMultimodal({
+            path: stripFilePrefix(paths.mmproj),
+            use_gpu: true,
+            image_max_tokens: 512,
+          });
+          console.log(`[edge/gemma] initMultimodal result: ${ok}`);
+        } catch (e) {
+          console.warn("[edge/gemma] initMultimodal failed:", e);
+        }
+      }
     })();
 
     try {
@@ -133,16 +167,45 @@ export class GemmaLocalRunner implements Stage1Runner {
 }
 
 function parseStage1Json(raw: string): Stage1Output {
+  // 小型モデル (SmolVLM 500M 等) は JSON 形式を守らず自然言語で返すことが多い。
+  // まず JSON 抽出を試み、失敗したらキーワードベースのヒューリスティクスに落とす。
   const start = raw.indexOf("{");
   const end = raw.lastIndexOf("}");
-  const body = start >= 0 && end > start ? raw.slice(start, end + 1) : raw;
-  const obj = JSON.parse(body);
+  if (start >= 0 && end > start) {
+    try {
+      const obj = JSON.parse(raw.slice(start, end + 1));
+      return {
+        judgment:
+          obj.judgment === "next" || obj.judgment === "anomaly" ? obj.judgment : "continue",
+        confidence: Math.max(0, Math.min(1, Number(obj.confidence) || 0.5)),
+        message: String(obj.message ?? ""),
+        can_handle: obj.can_handle !== false,
+        escalation_reason: String(obj.escalation_reason ?? ""),
+      };
+    } catch {
+      // fallthrough to heuristic
+    }
+  }
+
+  // --- ヒューリスティクスフォールバック ---
+  // JSON で返せなかった場合、自然言語応答のキーワードから judgment を推定。
+  // 自信度は低く (0.3) can_handle=false にして BE エスカレーションを促す。
+  const lower = raw.toLowerCase();
+  const anomalyHit = /(danger|warning|stop|危険|異常|違う|間違|焦|煙|火|こぼ|burn|smoke|wrong)/i.test(
+    raw,
+  );
+  const nextHit = /(完了|終わ|次へ|done|finished|complete|ok|good|次)/i.test(raw) && !anomalyHit;
+  const judgment: Stage1Output["judgment"] = anomalyHit
+    ? "anomaly"
+    : nextHit
+      ? "next"
+      : "continue";
+  const message = raw.replace(/\s+/g, " ").trim().slice(0, 120);
   return {
-    judgment:
-      obj.judgment === "next" || obj.judgment === "anomaly" ? obj.judgment : "continue",
-    confidence: Math.max(0, Math.min(1, Number(obj.confidence) || 0.5)),
-    message: String(obj.message ?? ""),
-    can_handle: obj.can_handle !== false,
-    escalation_reason: String(obj.escalation_reason ?? ""),
+    judgment,
+    confidence: 0.3,
+    message,
+    can_handle: false, // 判定信頼性低いので BE エスカレーション
+    escalation_reason: `edge parse heuristic (lower=${lower.slice(0, 80)}...)`,
   };
 }

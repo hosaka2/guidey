@@ -7,24 +7,28 @@ import { TamaguiProvider } from "@tamagui/core";
 import "react-native-reanimated";
 
 import config from "../tamagui.config";
-import { ApiProvider } from "@/contexts/ApiContext";
+import { ApiProvider, useApiContext } from "@/contexts/ApiContext";
 import { useLayoutVariant } from "@/lib/hooks";
 import { UnityBridgeView } from "@/lib/xreal";
 
 /**
- * Unity を全画面にする条件:
- *   - Settings の layoutVariant が smart-glasses (スマートグラスモード)
- *   - 画面が guide / explore (撮影・LLM 応答を伴う画面)
+ * Unity を mount する条件:
+ *   - Settings の layoutVariant が smart-glasses
+ *   - かつ cameraSource が xreal-eye (Unity 経由の Eye カメラを使う設定)
  *
- * スマホモード (phone-landscape / phone-vr) では Unity を一切起動させない。
+ * この両方を満たさない場合は Unity を一切起動させない (RN UI 単独で動く)。
  * SurfaceView が一瞬でも出るとスマホ画面の RN UI が隠れるため、mount 自体しない。
+ *
+ * visible は撮影画面 (guide/explore) 時のみ true → Unity 全画面でグラスに描画。
+ * それ以外では 1×1 hidden (UnityPlayer は裏で動き続けるが画面には出ない)。
  */
 function UnityHost() {
   const variant = useLayoutVariant();
+  const { cameraSource } = useApiContext();
   const segments = useSegments();
   const onCaptureScreen = segments[0] === "guide" || segments[0] === "explore";
 
-  if (variant !== "smart-glasses") return null;
+  if (variant !== "smart-glasses" || cameraSource !== "xreal-eye") return null;
   return <UnityBridgeView visible={onCaptureScreen} />;
 }
 
@@ -100,13 +104,6 @@ export default function RootLayout() {
             options={{
               presentation: "modal",
               headerTitle: "Settings",
-              orientation: "portrait",
-            }}
-          />
-          <Stack.Screen
-            name="camera-probe"
-            options={{
-              headerTitle: "Camera Probe",
               orientation: "portrait",
             }}
           />

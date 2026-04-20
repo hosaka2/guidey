@@ -84,7 +84,9 @@ backend/static/
 
 DB: `backend/db/guidey.db` (Milvus Lite, SQLiteベース)
 
-コレクション: `diy`, `cooking` (モード別)
+コレクション: `diy`, `cooking` (ドメイン/カテゴリ別。`RAG_COLLECTIONS` @ [domain/guide/model.py](../backend/src/domain/guide/model.py))
+
+アプリの「モード」(guide / explore) とは独立。検索時は `RAG_COLLECTIONS` を横断して探す。
 
 | フィールド | 型 | 説明 |
 |---|---|---|
@@ -204,20 +206,47 @@ fused = reciprocal_rank_fusion([dense_results, bm25_results])
 
 ## アプリでの利用箇所
 
-### プラン自動生成 (`plan_use_case.py`)
-1. ゴール入力 → RAG検索 (テキスト Dense) → 関連ステップをコンテキストに含める
-2. LLM (Gemma 4) がステップリストを生成
-3. 各ステップのテキストで再度RAG検索 → お手本画像 (frame_url) を事前キャッシュ
-4. メモリキャッシュで同一ゴールの再生成を回避
+UseCase 配置: [backend/src/application/guide/usecases/](../backend/src/application/guide/usecases/)
 
-### 手動解析 (`use_case.py`)
-1. カメラ画像 + ゴール → RAG検索 (ハイブリッド) → 参考ステップを取得
-2. LLMに画像 + 参考ステップを渡して指示生成
-3. SSEストリーミングでモバイルに返却
+### プラン自動生成 ([plan_use_case.py](../backend/src/application/guide/usecases/plan_use_case.py))
+1. ゴール入力 → `RAG_COLLECTIONS` 横断検索 (テキスト Dense, top_k=15)
+2. Multi-Document Synthesis context を組み立て
+3. LLM (Gemma 4) がステップリストを生成
+4. 各ステップのテキストで再検索 → お手本画像 (frame_url) を事前キャッシュ
+5. `plan_source_id = generated-{md5(goal)[:8]}` でメモリ再利用
 
-### 自律判定 (`judge_use_case.py`)
-- RAGは直接使わず、プラン (ステップリスト) をもとに判定
-- LangGraph State Machine で observe → think (pipeline) → safety_check → act
+### 解析 ([analyze_use_case.py](../backend/src/application/guide/usecases/analyze_use_case.py))
+1. `/guide/analyze` ハンドラ。カメラ画像 + ゴール → RAG 横断検索 (Hybrid)
+2. 上位ヒットから `StreamMeta` (video_id, steps) を作り SSE で先に流す
+3. LLM に画像 + 参考ステップを渡し、本文を SSE ストリーミング
+
+### 定期監視 ([periodic_use_case.py](../backend/src/application/guide/usecases/periodic_use_case.py))
+- `/guide/periodic` 用の pass-through UseCase
+- 実体は [agent/agent.py](../backend/src/infrastructure/agent/agent.py) の LangGraph 経由
+- RAG は現状直接は呼ばず、エージェント内 tools (`build_hq_tools`) で必要時に利用
+
+### チャット ([chat_use_case.py](../backend/src/application/guide/usecases/chat_use_case.py))
+- `/guide/chat` 用。ユーザー発話 + カメラ画像 → agent を user_action モードで起動
+- LangGraph が判定 + tool 使用 + 応答生成を担当
+
+### エージェント Graph ([agent/graph.py](../backend/src/infrastructure/agent/graph.py))
+
+```
+START → entry (router)
+          ├─ is_calibration=True      → calibrate ─► END
+          ├─ precomputed_stage1 あり  → seed_stage1 ─┐   (エッジ推論経路)
+          └─ 通常                     → stage1 ─────┤
+                                                     ↓
+                                          (escalated?)
+                                          ├─ yes → stage2 ─┐
+                                          └─ no  ─┐        ↓
+                                                  └─► safety ─► END
+```
+
+- **stage1**: 軽量 LLM で継続/遷移判定 (cloud 推論)
+- **stage2**: `create_react_agent` + tool (`build_hq_tools` の RAG 検索等)
+- **safety**: `check_step_safety` ドメインルール + chat_history 更新 + 最終 SSE emit
+- **checkpointer**: `AsyncRedisSaver` が session_id ごとに state 永続化 (image_bytes は per-call 入力で state に入れない)
 
 ---
 
@@ -269,7 +298,7 @@ backend/
 | `MILVUS_DB_PATH` | `./db/guidey.db` | Milvus Lite DBのパス |
 | `EMBEDDING_MODEL` | `nomic-embed-text` | 埋め込みモデル名 |
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama APIのURL |
-| `OLLAMA_MODEL` | `gemma4:e2b` | LLM/VLMモデル名 |
+| `OLLAMA_MODEL` | `gemma4:e4b` | LLM/VLMモデル名 |
 
 ---
 
@@ -280,7 +309,7 @@ backend/
 brew install yt-dlp ffmpeg
 
 # Ollamaモデル
-ollama pull gemma4:e2b
+ollama pull gemma4:e4b
 ollama pull nomic-embed-text
 
 # データ登録 (単一URL)

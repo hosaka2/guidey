@@ -20,19 +20,41 @@ export type ModelBundle = {
   mmproj: ModelAsset;
 };
 
-// デフォルト: unsloth/gemma-4-E2B-it-GGUF Q4_K_M + F16 mmproj
+// デフォルト: ggml-org/SmolVLM-500M-Instruct-GGUF (VLM, ~700MB)。
+// iPhone の per-app メモリ上限 (~3GB) で Gemma 4 E2B / Gemma 3 4B は OOM するため、
+// 小型の SmolVLM を採用。精度は落ちるが iPhone 実機で動く
 export const DEFAULT_MODEL: ModelBundle = {
-  id: "gemma-4-e2b-it-q4_k_m",
+  id: "smolvlm-500m-instruct-q8",
   version: "1",
   main: {
-    url: "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf",
-    filename: "gemma-4-E2B-it-Q4_K_M.gguf",
+    url: "https://huggingface.co/ggml-org/SmolVLM-500M-Instruct-GGUF/resolve/main/SmolVLM-500M-Instruct-Q8_0.gguf",
+    filename: "SmolVLM-500M-Instruct-Q8_0.gguf",
   },
   mmproj: {
-    url: "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/mmproj-F16.gguf",
-    filename: "mmproj-F16.gguf",
+    url: "https://huggingface.co/ggml-org/SmolVLM-500M-Instruct-GGUF/resolve/main/mmproj-SmolVLM-500M-Instruct-Q8_0.gguf",
+    filename: "mmproj-SmolVLM-500M-Instruct-Q8_0.gguf",
   },
 };
+
+// 候補モデル (iPhone で OOM):
+//
+// [A] Gemma 4 E2B — VLM 対応、~3GB で iPhone は OOM
+// {
+//   id: "gemma-4-e2b-it-q4_k_m", version: "1",
+//   main: { url: "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/gemma-4-E2B-it-Q4_K_M.gguf",
+//           filename: "gemma-4-E2B-it-Q4_K_M.gguf" },
+//   mmproj: { url: "https://huggingface.co/unsloth/gemma-4-E2B-it-GGUF/resolve/main/mmproj-F16.gguf",
+//             filename: "mmproj-F16.gguf" },
+// };
+//
+// [B] Gemma 3 4B — VLM 対応、~3.2GB で iPhone は OOM
+// {
+//   id: "gemma-3-4b-it-q4_k_m", version: "1",
+//   main: { url: "https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/main/gemma-3-4b-it-Q4_K_M.gguf",
+//           filename: "gemma-3-4b-it-Q4_K_M.gguf" },
+//   mmproj: { url: "https://huggingface.co/unsloth/gemma-3-4b-it-GGUF/resolve/main/mmproj-F16.gguf",
+//             filename: "mmproj-F16.gguf" },
+// };
 
 const STORAGE_KEY = "guidey_edge_model_meta";
 

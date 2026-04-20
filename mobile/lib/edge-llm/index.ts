@@ -4,12 +4,14 @@ import type { EdgeMode, Stage1Runner } from "./types";
 
 export type {
   EdgeMode,
+  EdgePipeline,
   EdgeStep,
   Stage1Input,
   Stage1Output,
   Stage1Runner,
 } from "./types";
-export { buildEdgePrompt } from "./types";
+export { buildEdgePrompt } from "./prompts";
+export type { EdgePromptBuilder, EdgePromptOptions } from "./prompts";
 
 const _runners: Partial<Record<EdgeMode, Stage1Runner>> = {};
 
